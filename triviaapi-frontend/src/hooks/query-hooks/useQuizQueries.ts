@@ -107,15 +107,33 @@ export const useNextScheduledQuiz = (options?: UseQueryOptions<Quiz | null, Erro
   return useQuery({
     queryKey: [...quizKeys.scheduled(), 'next'],
     queryFn: async () => {
-      const quizzes = await quizService.getScheduledQuizzes();
-      if (!quizzes || quizzes.length === 0) return null;
-      
-      // Сортируем по времени начала (от ближайшего)
-      return quizzes.sort((a, b) => 
-        new Date(a.start_time).getTime() - new Date(b.start_time).getTime()
-      )[0];
+      console.log('Fetching scheduled quizzes');
+      try {
+        const quizzes = await quizService.getScheduledQuizzes();
+        console.log('Scheduled quizzes received:', quizzes);
+        
+        if (!quizzes || quizzes.length === 0) {
+          console.log('No scheduled quizzes available');
+          return null;
+        }
+        
+        // Сортируем по времени начала (от ближайшего)
+        const sortedQuizzes = quizzes.sort((a, b) => {
+          const timeA = new Date(a.start_time || a.scheduled_time || '').getTime();
+          const timeB = new Date(b.start_time || b.scheduled_time || '').getTime();
+          return timeA - timeB;
+        });
+        
+        console.log('Next scheduled quiz:', sortedQuizzes[0]);
+        return sortedQuizzes[0];
+      } catch (error) {
+        console.error('Error fetching scheduled quizzes:', error);
+        throw error;
+      }
     },
     staleTime: 60 * 1000, // 1 минута
+    refetchInterval: 60 * 1000, // Перепроверяем каждую минуту
+    retry: 2,
     ...options,
   });
 };
