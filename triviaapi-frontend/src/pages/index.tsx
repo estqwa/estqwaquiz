@@ -39,7 +39,7 @@ const Home: NextPage = () => {
   // Функция для форматирования времени начала викторины
   const formatQuizTime = (quiz: Quiz | null): string => {
     if (!quiz) return '';
-    const timeString = quiz.start_time || quiz.scheduled_time || '';
+    const timeString = quiz.startTime || quiz.scheduledTime || '';
     if (!timeString) return 'Время не указано';
     
     try {
@@ -109,15 +109,15 @@ const Home: NextPage = () => {
                 <p className="text-gray-600 mb-4">{quizToShow.description}</p>
                 
                 <div className="mb-4 flex flex-wrap gap-2">
-                  {quizToShow.question_count && (
+                  {quizToShow.questionCount && (
                     <span className="px-2 py-1 text-xs rounded-full bg-gray-100 text-gray-800">
-                      {quizToShow.question_count} вопросов
+                      {quizToShow.questionCount} вопросов
                     </span>
                   )}
                   
-                  {quizToShow.duration_minutes && (
+                  {quizToShow.durationMinutes && (
                     <span className="px-2 py-1 text-xs rounded-full bg-gray-100 text-gray-800">
-                      {quizToShow.duration_minutes} минут
+                      {quizToShow.durationMinutes} минут
                     </span>
                   )}
 

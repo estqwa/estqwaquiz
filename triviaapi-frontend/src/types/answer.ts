@@ -3,16 +3,16 @@
  */
 export interface UserAnswer {
   id?: number; // Уникальный идентификатор ответа
-  user_id?: number; // Идентификатор пользователя
-  quiz_id?: number; // Идентификатор викторины
-  question_id: number; // Идентификатор вопроса
-  option_id?: number; // ID выбранного ответа (используется в WebSocket)
-  answer_data?: any; // Данные ответа пользователя в формате JSON
-  is_correct?: boolean; // Флаг правильности ответа
-  points_earned?: number; // Заработанные баллы
-  answer_time_ms?: number; // Время ответа в миллисекундах
-  time_taken_ms?: number; // Другое имя для времени ответа в WebSocket API
-  submitted_at?: string; // Дата и время отправки ответа
-  client_info?: Record<string, any>; // Информация о клиенте в формате JSON
-  your_answer?: number; // Синоним для option_id в WebSocket API
+  userId?: number; // Идентификатор пользователя
+  quizId?: number; // Идентификатор викторины
+  questionId: number; // Идентификатор вопроса
+  optionId?: number; // ID выбранного ответа (используется в WebSocket)
+  answerData?: any; // Данные ответа пользователя в формате JSON
+  isCorrect?: boolean; // Флаг правильности ответа
+  pointsEarned?: number; // Заработанные баллы
+  answerTimeMs?: number; // Время ответа в миллисекундах
+  timeTakenMs?: number; // Другое имя для времени ответа в WebSocket API
+  submittedAt?: string; // Дата и время отправки ответа
+  clientInfo?: Record<string, any>; // Информация о клиенте в формате JSON
+  yourAnswer?: number; // Синоним для optionId в WebSocket API
 } 

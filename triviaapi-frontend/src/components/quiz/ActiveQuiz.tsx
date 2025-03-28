@@ -59,12 +59,12 @@ const ActiveQuiz: React.FC<ActiveQuizProps> = ({ quizId }) => {
       
       // Обновляем состояние в Redux
       dispatch(updateUserAnswer({
-        quiz_id: quizId,
-        question_id: currentQuestion.id,
-        selected_option: Number(answerId),
-        is_correct: false, // Пока не знаем правильно или нет
-        response_time_ms: 0, // Это придет с сервера
-        score: 0 // Это придет с сервера
+        quizId: quizId,
+        questionId: currentQuestion.id,
+        optionId: Number(answerId),
+        isCorrect: false, // Пока не знаем правильно или нет
+        answerTimeMs: 0, // Это придет с сервера
+        pointsEarned: 0 // Это придет с сервера
       }));
       
       // Обновляем локальное состояние

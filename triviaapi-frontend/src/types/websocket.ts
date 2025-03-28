@@ -59,52 +59,52 @@ export enum MessagePriority {
  * События связанные с токенами
  */
 export interface TokenRefreshedEvent {
-  user_id: number;
-  device_id?: string;
-  access_token: string;
-  csrf_token: string;
-  expires_in: number;
+  userId: number;
+  deviceId?: string;
+  accessToken: string;
+  csrfToken: string;
+  expiresIn: number;
 }
 
 export interface TokenInvalidatedEvent {
-  user_id: number;
-  device_id?: string;
-  token_id?: string;
+  userId: number;
+  deviceId?: string;
+  tokenId?: string;
   reason: string;
 }
 
 export interface TokenExpiryWarningEvent {
-  user_id: number;
-  expires_in: number; // секунды до истечения
-  token_id?: string;
+  userId: number;
+  expiresIn: number; // секунды до истечения
+  tokenId?: string;
 }
 
 export interface KeyRotationEvent {
-  user_id: number;
-  device_id?: string;
-  access_token: string;
-  csrf_token: string;
-  expires_in: number;
-  rotation_reason?: string; // Причина ротации (плановая, внеплановая и т.д.)
+  userId: number;
+  deviceId?: string;
+  accessToken: string;
+  csrfToken: string;
+  expiresIn: number;
+  rotationReason?: string; // Причина ротации (плановая, внеплановая и т.д.)
 }
 
 /**
  * События викторин
  */
 export interface QuizStartEvent {
-  quiz_id: number;
+  quizId: number;
   title: string;
   description: string;
-  num_questions: number;
-  duration_minutes: number;
-  start_time: string; // ISO 8601 формат даты
+  numQuestions: number;
+  durationMinutes: number;
+  startTime: string; // ISO 8601 формат даты
 }
 
 export interface QuizEndEvent {
-  quiz_id: number;
+  quizId: number;
   message: string;
   winners?: Array<{
-    user_id: number;
+    userId: number;
     username: string;
     score: number;
     position: number;
@@ -112,57 +112,57 @@ export interface QuizEndEvent {
 }
 
 export interface QuestionStartEvent {
-  quiz_id: number;
-  question_id: number;
-  question_number: number;
+  quizId: number;
+  questionId: number;
+  questionNumber: number;
   text: string;
   options: Array<{
     id: number;
     text: string;
   }>;
-  duration_seconds: number;
-  total_questions: number;
-  start_time: string; // ISO 8601 формат даты
+  durationSeconds: number;
+  totalQuestions: number;
+  startTime: string; // ISO 8601 формат даты
 }
 
 export interface QuestionEndEvent {
-  quiz_id: number;
-  question_id: number;
-  correct_option_id: number;
+  quizId: number;
+  questionId: number;
+  correctOptionId: number;
   explanation?: string;
 }
 
 export interface UserAnswerEvent {
-  quiz_id: number;
-  question_id: number;
-  option_id: number;
-  answer_time: string; // ISO 8601 формат даты
+  quizId: number;
+  questionId: number;
+  optionId: number;
+  answerTime: string; // ISO 8601 формат даты
 }
 
 export interface ResultUpdateEvent {
-  quiz_id: number;
+  quizId: number;
   leaderboard: Array<{
-    user_id: number;
+    userId: number;
     username: string;
     score: number;
     position: number;
   }>;
-  user_stats?: {
-    correct_answers: number;
-    total_answers: number;
+  userStats?: {
+    correctAnswers: number;
+    totalAnswers: number;
     position: number;
     score: number;
   };
 }
 
 export interface QuizTimerEvent {
-  quiz_id: number;
-  question_id: number;
-  remaining_seconds: number;
+  quizId: number;
+  questionId: number;
+  remainingSeconds: number;
 }
 
 export interface QuizCancelledEvent {
-  quiz_id: number;
+  quizId: number;
   message: string;
   reason?: string;
 }
@@ -171,52 +171,52 @@ export interface QuizCancelledEvent {
  * События анонса и ожидания викторины
  */
 export interface QuizAnnouncementEvent {
-  quiz_id: number;
+  quizId: number;
   title: string;
   description: string;
-  scheduled_time: string;
-  question_count: number;
+  scheduledTime: string;
+  questionCount: number;
 }
 
 export interface QuizWaitingRoomEvent {
-  quiz_id: number;
+  quizId: number;
   title: string;
-  starts_in_seconds: number;
+  startsInSeconds: number;
 }
 
 export interface QuizCountdownEvent {
-  quiz_id: number;
-  seconds_left: number;
+  quizId: number;
+  secondsLeft: number;
 }
 
 export interface QuizAnswerRevealEvent {
-  question_id: number;
-  correct_option: number;
+  questionId: number;
+  correctOption: number;
 }
 
 export interface QuizAnswerResultEvent {
-  question_id: number;
-  correct_option: number;
-  your_answer: number;
-  is_correct: boolean;
-  points_earned: number;
-  time_taken_ms: number;
+  questionId: number;
+  correctOption: number;
+  yourAnswer: number;
+  isCorrect: boolean;
+  pointsEarned: number;
+  timeTakenMs: number;
 }
 
 export interface QuizLeaderboardEvent {
-  quiz_id: number;
+  quizId: number;
   results: Array<{
-    user_id: number;
+    userId: number;
     username: string;
     score: number;
-    correct_answers: number;
+    correctAnswers: number;
     rank: number;
   }>;
 }
 
 export interface QuizUserReadyEvent {
-  user_id: number;
-  quiz_id: number;
+  userId: number;
+  quizId: number;
   status: string;
 }
 
@@ -224,8 +224,8 @@ export interface QuizUserReadyEvent {
  * Системные события
  */
 export interface ShardMigrationEvent {
-  old_shard_id: number;
-  new_shard_id: number;
-  migration_token: string;
-  migration_reason: string;
+  oldShardId: number;
+  newShardId: number;
+  migrationToken: string;
+  migrationReason: string;
 } 

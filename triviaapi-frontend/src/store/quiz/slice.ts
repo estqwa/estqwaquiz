@@ -47,12 +47,12 @@ const quizSlice = createSlice({
       }
       state.currentQuestion = action.payload;
       state.quizStatus = 'active';
-      state.remainingTime = action.payload.time_limit_seconds;
+      state.remainingTime = action.payload.timeLimitSeconds;
       state.error = null;
     },
     // Добавление/обновление ответа пользователя
     updateUserAnswer: (state, action: PayloadAction<UserAnswer>) => {
-      state.userAnswers[action.payload.question_id] = action.payload;
+      state.userAnswers[action.payload.questionId] = action.payload;
     },
     // Обновление таймера вопроса
     updateRemainingTime: (state, action: PayloadAction<number>) => {

@@ -7,15 +7,15 @@ export interface Quiz {
   description: string;
   category?: string; // Категория викторины
   difficulty?: 'easy' | 'medium' | 'hard'; // Сложность
-  creator_id?: number; // ID создателя викторины
-  is_public?: boolean; // Флаг публичной доступности
-  start_time: string; // Запланированное время начала
-  end_time?: string; // Запланированное время окончания
-  duration_minutes?: number; // Продолжительность в минутах
-  question_count: number; // Количество вопросов
-  created_at?: string;
-  updated_at?: string;
+  creatorId?: number; // ID создателя викторины
+  isPublic?: boolean; // Флаг публичной доступности
+  startTime: string; // Запланированное время начала
+  endTime?: string; // Запланированное время окончания
+  durationMinutes?: number; // Продолжительность в минутах
+  questionCount: number; // Количество вопросов
+  createdAt?: string;
+  updatedAt?: string;
   settings?: Record<string, any>; // Настройки викторины в формате JSON
   status: 'draft' | 'published' | 'active' | 'completed' | 'cancelled'; // Статус викторины
-  scheduled_time?: string; // Синоним для start_time, используется в некоторых API
+  scheduledTime?: string; // Синоним для startTime, используется в некоторых API
 } 
