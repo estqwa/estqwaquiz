@@ -85,7 +85,7 @@ export const authService = {
       if (!refreshToken) {
         throw new Error('No refresh token available');
       }
-      requestData = { refresh_token: refreshToken };
+      requestData = { refreshToken: refreshToken };
     }
 
     // Для Cookie Auth refresh_token и так будет в cookies, ничего передавать не нужно

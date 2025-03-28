@@ -13,34 +13,34 @@ export interface WebSocketMessage {
  */
 export enum WebSocketEventType {
   // События аутентификации
-  TOKEN_EXPIRE_SOON = 'TOKEN_EXPIRE_SOON',
-  TOKEN_EXPIRED = 'TOKEN_EXPIRED',
-  TOKEN_REVOKED = 'TOKEN_REVOKED',
-  TOKEN_INVALIDATED = 'TOKEN_INVALIDATED',
-  TOKEN_REFRESHED = 'TOKEN_REFRESHED',
+  TOKEN_EXPIRE_SOON = 'token_expire_soon',
+  TOKEN_EXPIRED = 'token_expired',
+  TOKEN_REVOKED = 'token_revoked',
+  TOKEN_INVALIDATED = 'token_invalidated',
+  TOKEN_REFRESHED = 'token_refreshed',
   
   // События викторины
-  QUIZ_START = 'QUIZ_START',
-  QUIZ_END = 'QUIZ_END',
-  QUESTION_START = 'QUESTION_START',
-  QUESTION_END = 'QUESTION_END',
-  USER_ANSWER = 'USER_ANSWER',
-  RESULT_UPDATE = 'RESULT_UPDATE',
+  QUIZ_START = 'quiz_start',
+  QUIZ_END = 'quiz_end',
+  QUESTION_START = 'question_start',
+  QUESTION_END = 'question_end',
+  USER_ANSWER = 'user_answer',
+  RESULT_UPDATE = 'result_update',
   
   // Системные события
   USER_HEARTBEAT = 'user:heartbeat',
   SERVER_HEARTBEAT = 'server:heartbeat',
   
   // Дополнительные события (проверить соответствие на бэкенде)
-  QUIZ_TIMER = 'QUIZ_TIMER',
-  QUIZ_CANCELLED = 'QUIZ_CANCELLED',
-  QUIZ_ANNOUNCEMENT = 'QUIZ_ANNOUNCEMENT',
-  QUIZ_WAITING_ROOM = 'QUIZ_WAITING_ROOM',
-  QUIZ_COUNTDOWN = 'QUIZ_COUNTDOWN',
-  QUIZ_ANSWER_REVEAL = 'QUIZ_ANSWER_REVEAL',
-  QUIZ_ANSWER_RESULT = 'QUIZ_ANSWER_RESULT',
-  QUIZ_LEADERBOARD = 'QUIZ_LEADERBOARD',
-  QUIZ_USER_READY = 'QUIZ_USER_READY'
+  QUIZ_TIMER = 'quiz_timer',
+  QUIZ_CANCELLED = 'quiz_cancelled',
+  QUIZ_ANNOUNCEMENT = 'quiz_announcement',
+  QUIZ_WAITING_ROOM = 'quiz_waiting_room',
+  QUIZ_COUNTDOWN = 'quiz_countdown',
+  QUIZ_ANSWER_REVEAL = 'quiz_answer_reveal',
+  QUIZ_ANSWER_RESULT = 'quiz_answer_result',
+  QUIZ_LEADERBOARD = 'quiz_leaderboard',
+  QUIZ_USER_READY = 'quiz_user_ready'
 }
 
 /**
