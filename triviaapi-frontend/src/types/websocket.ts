@@ -13,34 +13,36 @@ export interface WebSocketMessage {
  */
 export enum WebSocketEventType {
   // События аутентификации
-  TOKEN_EXPIRE_SOON = 'token_expire_soon',
-  TOKEN_EXPIRED = 'token_expired',
-  TOKEN_REVOKED = 'token_revoked',
-  TOKEN_INVALIDATED = 'token_invalidated',
-  TOKEN_REFRESHED = 'token_refreshed',
+  TOKEN_EXPIRE_SOON = 'TOKEN_EXPIRE_SOON',
+  TOKEN_EXPIRED = 'TOKEN_EXPIRED',
+  TOKEN_REVOKED = 'TOKEN_REVOKED',
+  TOKEN_INVALIDATED = 'TOKEN_INVALIDATED',
+  TOKEN_REFRESHED = 'TOKEN_REFRESHED',
   
   // События викторины
-  QUIZ_START = 'quiz_start',
-  QUIZ_END = 'quiz_end',
-  QUESTION_START = 'question_start',
-  QUESTION_END = 'question_end',
-  USER_ANSWER = 'user_answer',
-  RESULT_UPDATE = 'result_update',
+  QUIZ_START = 'quiz:start',
+  QUIZ_END = 'quiz:end',
+  QUESTION_START = 'quiz:question',       // На бэкенде соответствует quiz:question
+  QUESTION_END = 'QUESTION_END',          // На бэкенде используется QUESTION_END
+  USER_ANSWER = 'USER_ANSWER',            // На бэкенде используется USER_ANSWER
+  RESULT_UPDATE = 'RESULT_UPDATE',        // На бэкенде используется RESULT_UPDATE
   
   // Системные события
   USER_HEARTBEAT = 'user:heartbeat',
   SERVER_HEARTBEAT = 'server:heartbeat',
   
-  // Дополнительные события (проверить соответствие на бэкенде)
-  QUIZ_TIMER = 'quiz_timer',
-  QUIZ_CANCELLED = 'quiz_cancelled',
-  QUIZ_ANNOUNCEMENT = 'quiz_announcement',
-  QUIZ_WAITING_ROOM = 'quiz_waiting_room',
-  QUIZ_COUNTDOWN = 'quiz_countdown',
-  QUIZ_ANSWER_REVEAL = 'quiz_answer_reveal',
-  QUIZ_ANSWER_RESULT = 'quiz_answer_result',
-  QUIZ_LEADERBOARD = 'quiz_leaderboard',
-  QUIZ_USER_READY = 'quiz_user_ready'
+  // Дополнительные события
+  QUIZ_TIMER = 'quiz:timer',
+  QUIZ_CANCELLED = 'quiz:cancelled',
+  QUIZ_ANNOUNCEMENT = 'quiz:announcement',
+  QUIZ_WAITING_ROOM = 'quiz:waiting_room',
+  QUIZ_COUNTDOWN = 'quiz:countdown',
+  QUIZ_ANSWER_REVEAL = 'quiz:answer_reveal',
+  QUIZ_ANSWER_RESULT = 'quiz:answer_result',
+  QUIZ_LEADERBOARD = 'quiz:leaderboard',
+  QUIZ_USER_READY = 'quiz:user_ready',
+  QUIZ_RESULTS_AVAILABLE = 'quiz:results_available',
+  QUIZ_FINISH = 'quiz:finish'              // Дополнительно обнаружено в коде
 }
 
 /**
