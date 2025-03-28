@@ -14,7 +14,8 @@ import {
   WebSocketEventType, 
   QuizStartEvent, 
   QuestionStartEvent, 
-  QuizTimerEvent 
+  QuizTimerEvent,
+  QuizCountdownEvent
 } from '../types/websocket';
 
 // Создаем QueryClient один раз
@@ -66,9 +67,10 @@ const WebSocketManager = () => {
           const unsubQuizStart = wsClient.addMessageHandler(WebSocketEventType.QUIZ_START, handleQuizStart);
           const unsubQuestionStart = wsClient.addMessageHandler(WebSocketEventType.QUESTION_START, handleQuestionStart);
           const unsubQuestionTimer = wsClient.addMessageHandler(WebSocketEventType.QUIZ_TIMER, handleQuestionTimer);
+          const unsubQuizCountdown = wsClient.addMessageHandler(WebSocketEventType.QUIZ_COUNTDOWN, handleQuizCountdown);
           
           // Сохраняем функции отписки для дальнейшего использования
-          unsubscribeHandlers = [unsubQuizStart, unsubQuestionStart, unsubQuestionTimer];
+          unsubscribeHandlers = [unsubQuizStart, unsubQuestionStart, unsubQuestionTimer, unsubQuizCountdown];
         } catch (error) {
           console.error('WebSocket connection failed:', error);
           // Ошибка уже должна быть в Redux store через wsError
@@ -96,48 +98,56 @@ const WebSocketManager = () => {
   const handleQuizStart = (data: QuizStartEvent) => {
     store.dispatch(setActiveQuiz({
       quiz: {
-        id: data.quiz_id,
+        id: data.quizId,
         title: data.title,
         description: data.description || '',
-        question_count: data.num_questions,
+        questionCount: data.numQuestions,
         status: 'active',
-        start_time: data.start_time,
-        duration_minutes: data.duration_minutes,
+        startTime: data.startTime,
+        durationMinutes: data.durationMinutes,
         // Добавляем обязательные поля для типа Quiz
         category: '',
         difficulty: 'medium',
-        creator_id: 0,
-        is_public: true,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString()
+        creatorId: 0,
+        isPublic: true,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
       }
     }));
   };
   
   const handleQuestionStart = (data: QuestionStartEvent) => {
     store.dispatch(setCurrentQuestion({
-      id: data.question_id,
-      quiz_id: data.quiz_id,
+      id: data.questionId,
+      quizId: data.quizId,
       text: data.text,
       type: 'single_choice',
       points: 10,
-      time_limit_seconds: data.duration_seconds,
+      timeLimitSeconds: data.durationSeconds,
       options: data.options.map((option: { id: number; text: string }) => ({
         id: option.id,
         text: option.text
       })),
-      correct_answers: [],
-      order_num: data.question_number,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
+      correctAnswers: [],
+      orderNum: data.questionNumber,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
     }));
   };
   
   const handleQuestionTimer = (data: QuizTimerEvent) => {
     // Проверяем, относится ли таймер к текущей викторине
     const currentQuiz = store.getState().quiz.activeQuiz;
-    if (currentQuiz && currentQuiz.id === data.quiz_id) {
-      store.dispatch(updateRemainingTime(data.remaining_seconds));
+    if (currentQuiz && currentQuiz.id === data.quizId) {
+      store.dispatch(updateRemainingTime(data.remainingSeconds));
+    }
+  };
+
+  const handleQuizCountdown = (data: QuizCountdownEvent) => {
+    // Обработка обратного отсчета до начала викторины
+    const currentQuiz = store.getState().quiz.activeQuiz;
+    if (currentQuiz && currentQuiz.id === data.quizId) {
+      store.dispatch(updateRemainingTime(data.secondsLeft));
     }
   };
 

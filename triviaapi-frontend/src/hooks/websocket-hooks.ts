@@ -276,17 +276,17 @@ export const useQuizWebSocket = (quizId?: number) => {
     // Обработчик начала викторины
     handlers.push(wsClient.addMessageHandler<QuizStartEvent>(WebSocketEventType.QUIZ_START, (data: QuizStartEvent) => {
       // Если прислали другую викторину, игнорируем
-      if (data.quiz_id !== quizId) return;
+      if (data.quizId !== quizId) return;
       
       dispatch(setActiveQuiz({
         quiz: {
-          id: data.quiz_id,
+          id: data.quizId,
           title: data.title,
           description: data.description || '',
-          question_count: data.num_questions,
+          questionCount: data.numQuestions,
           status: 'active',
-          start_time: data.start_time,
-          duration_minutes: data.duration_minutes
+          startTime: data.startTime,
+          durationMinutes: data.durationMinutes
         }
       }));
     }));
@@ -307,51 +307,54 @@ export const useQuizWebSocket = (quizId?: number) => {
 
     // Обработчик обратного отсчета
     handlers.push(wsClient.addMessageHandler<QuizCountdownEvent>(WebSocketEventType.QUIZ_COUNTDOWN, (data) => {
-      // Обработка обратного отсчета
-      console.log('Обратный отсчет до начала викторины:', data.seconds_left);
-      // Можно обновить UI с обратным отсчетом
+      // Если прислали данные для другой викторины, игнорируем
+      if (data.quizId !== quizId) return;
+      
+      console.log('Обратный отсчет до начала викторины:', data.secondsLeft);
+      // Обновляем время в Redux для отображения обратного отсчета
+      dispatch(updateRemainingTime(data.secondsLeft));
     }));
     
     // Обработчик нового вопроса
     handlers.push(wsClient.addMessageHandler<QuestionStartEvent>(WebSocketEventType.QUESTION_START, (data: QuestionStartEvent) => {
       // Если прислали вопрос для другой викторины, игнорируем
-      if (data.quiz_id !== quizId) return;
+      if (data.quizId !== quizId) return;
       
       dispatch(setCurrentQuestion({
-        id: data.question_id,
-        quiz_id: data.quiz_id,
+        id: data.questionId,
+        quizId: data.quizId,
         text: data.text,
         type: 'single_choice',
         points: 10,
-        time_limit_seconds: data.duration_seconds,
+        timeLimitSeconds: data.durationSeconds,
         options: data.options.map((option) => ({
           id: option.id,
           text: option.text
         })),
         // Новые поля из обновленного интерфейса
-        question_number: data.question_number,
-        duration_seconds: data.duration_seconds,
-        total_questions: data.total_questions,
-        start_time: data.start_time
+        questionNumber: data.questionNumber,
+        durationSeconds: data.durationSeconds,
+        totalQuestions: data.totalQuestions,
+        startTime: data.startTime
       }));
     }));
     
     // Обработчик таймера вопроса
     handlers.push(wsClient.addMessageHandler<QuizTimerEvent>(WebSocketEventType.QUIZ_TIMER, (data: QuizTimerEvent) => {
       // Если прислали таймер для другой викторины, игнорируем
-      if (data.quiz_id !== quizId) return;
+      if (data.quizId !== quizId) return;
       
-      dispatch(updateRemainingTime(data.remaining_seconds));
+      dispatch(updateRemainingTime(data.remainingSeconds));
     }));
     
     // Обработчик завершения вопроса
     handlers.push(wsClient.addMessageHandler<QuestionEndEvent>(WebSocketEventType.QUESTION_END, (data: QuestionEndEvent) => {
       // Если прислали вопрос для другой викторины, игнорируем
-      if (data.quiz_id !== quizId) return;
+      if (data.quizId !== quizId) return;
       
       dispatch(endCurrentQuestion({
-        questionId: data.question_id,
-        correctAnswer: data.correct_option_id
+        questionId: data.questionId,
+        correctAnswer: data.correctOptionId
       }));
     }));
     
@@ -369,52 +372,52 @@ export const useQuizWebSocket = (quizId?: number) => {
       
       // Обновляем ответ пользователя с полученным результатом
       dispatch(updateUserAnswer({
-        question_id: data.question_id,
-        option_id: data.your_answer,
-        is_correct: data.is_correct,
-        points_earned: data.points_earned,
-        time_taken_ms: data.time_taken_ms
+        questionId: data.questionId,
+        optionId: data.yourAnswer,
+        isCorrect: data.isCorrect,
+        pointsEarned: data.pointsEarned,
+        timeTakenMs: data.timeTakenMs
       }));
     }));
     
     // Обработчик обновления результатов
     handlers.push(wsClient.addMessageHandler<ResultUpdateEvent>(WebSocketEventType.RESULT_UPDATE, (data: ResultUpdateEvent) => {
       // Если прислали результаты для другой викторины, игнорируем
-      if (data.quiz_id !== quizId) return;
+      if (data.quizId !== quizId) return;
       
       // Обновляем таблицу лидеров
       if (data.leaderboard) {
         const leaderboard = data.leaderboard.map((item) => ({
           id: 0, // ID будет назначен бэкендом
-          user_id: item.user_id,
-          quiz_id: data.quiz_id,
+          userId: item.userId,
+          quizId: data.quizId,
           username: item.username,
           score: item.score,
-          total_points: item.score, // Используем score как total_points
-          correct_answers: 0, // Эти данные могут отсутствовать в leaderboard
-          total_questions: 0, // Эти данные могут отсутствовать в leaderboard
-          completion_time_ms: 0, // Устанавливаем значение по умолчанию
+          totalPoints: item.score, // Используем score как total_points
+          correctAnswers: 0, // Эти данные могут отсутствовать в leaderboard
+          totalQuestions: 0, // Эти данные могут отсутствовать в leaderboard
+          completionTimeMs: 0, // Устанавливаем значение по умолчанию
           rank: item.position,
-          completed_at: new Date().toISOString()
+          completedAt: new Date().toISOString()
         }));
         
         dispatch(setLeaderboard(leaderboard));
       }
       
       // Обновляем статистику пользователя
-      if (data.user_stats) {
+      if (data.userStats) {
         dispatch(setUserResults({
           id: 0, // ID будет назначен бэкендом
-          user_id: 0, // ID пользователя
-          quiz_id: data.quiz_id,
+          userId: 0, // ID пользователя
+          quizId: data.quizId,
           username: '', // Имя пользователя можно получить из auth store
-          score: data.user_stats.score,
-          total_points: data.user_stats.score, // Используем score как total_points
-          correct_answers: data.user_stats.correct_answers,
-          total_questions: data.user_stats.total_answers,
-          completion_time_ms: 0, // Устанавливаем значение по умолчанию
-          rank: data.user_stats.position,
-          completed_at: new Date().toISOString()
+          score: data.userStats.score,
+          totalPoints: data.userStats.score, // Используем score как total_points
+          correctAnswers: data.userStats.correctAnswers,
+          totalQuestions: data.userStats.totalAnswers,
+          completionTimeMs: 0, // Устанавливаем значение по умолчанию
+          rank: data.userStats.position,
+          completedAt: new Date().toISOString()
         }));
       }
     }));
@@ -422,21 +425,21 @@ export const useQuizWebSocket = (quizId?: number) => {
     // Обработчик таблицы лидеров 
     handlers.push(wsClient.addMessageHandler<QuizLeaderboardEvent>(WebSocketEventType.QUIZ_LEADERBOARD, (data) => {
       // Если прислали результаты для другой викторины, игнорируем
-      if (data.quiz_id !== quizId) return;
+      if (data.quizId !== quizId) return;
       
       // Преобразуем результаты в формат наших типов
       const leaderboard = data.results.map((item) => ({
         id: 0, // ID будет назначен бэкендом
-        user_id: item.user_id,
-        quiz_id: data.quiz_id,
+        userId: item.userId,
+        quizId: data.quizId,
         username: item.username,
         score: item.score,
-        total_points: item.score, // Используем score как total_points
-        correct_answers: item.correct_answers,
-        total_questions: 0, // Эти данные могут отсутствовать в leaderboard
-        completion_time_ms: 0, // Устанавливаем значение по умолчанию
+        totalPoints: item.score, // Используем score как total_points
+        correctAnswers: item.correctAnswers,
+        totalQuestions: 0, // Эти данные могут отсутствовать в leaderboard
+        completionTimeMs: 0, // Устанавливаем значение по умолчанию
         rank: item.rank,
-        completed_at: new Date().toISOString()
+        completedAt: new Date().toISOString()
       }));
       
       dispatch(setLeaderboard(leaderboard));
@@ -445,7 +448,7 @@ export const useQuizWebSocket = (quizId?: number) => {
     // Обработчик завершения викторины
     handlers.push(wsClient.addMessageHandler<QuizEndEvent>(WebSocketEventType.QUIZ_END, (data: QuizEndEvent) => {
       // Если прислали сообщение для другой викторины, игнорируем
-      if (data.quiz_id !== quizId) return;
+      if (data.quizId !== quizId) return;
       
       dispatch(setQuizEnded());
       
@@ -453,16 +456,16 @@ export const useQuizWebSocket = (quizId?: number) => {
       if (data.winners && data.winners.length > 0) {
         const leaderboard = data.winners.map((winner) => ({
           id: 0,
-          user_id: winner.user_id,
-          quiz_id: data.quiz_id,
+          userId: winner.userId,
+          quizId: data.quizId,
           username: winner.username,
           score: winner.score,
-          total_points: winner.score,
-          correct_answers: 0,
-          total_questions: 0,
-          completion_time_ms: 0,
+          totalPoints: winner.score,
+          correctAnswers: 0,
+          totalQuestions: 0,
+          completionTimeMs: 0,
           rank: winner.position,
-          completed_at: new Date().toISOString()
+          completedAt: new Date().toISOString()
         }));
         
         dispatch(setLeaderboard(leaderboard));
@@ -472,7 +475,7 @@ export const useQuizWebSocket = (quizId?: number) => {
     // Обработчик отмены викторины
     handlers.push(wsClient.addMessageHandler<QuizCancelledEvent>(WebSocketEventType.QUIZ_CANCELLED, (data: QuizCancelledEvent) => {
       // Если прислали сообщение для другой викторины, игнорируем
-      if (data.quiz_id !== quizId) return;
+      if (data.quizId !== quizId) return;
       
       dispatch(setQuizCancelled());
     }));
@@ -502,10 +505,10 @@ export const useSubmitAnswer = () => {
     try {
       // Отправляем ответ через WebSocket
       const success = wsClient.sendMessage<UserAnswerEvent>(WebSocketEventType.USER_ANSWER, {
-        quiz_id: Number(quizId),
-        question_id: Number(questionId),
-        option_id: Number(answerId),
-        answer_time: new Date().toISOString()
+        quizId: Number(quizId),
+        questionId: Number(questionId),
+        optionId: Number(answerId),
+        answerTime: new Date().toISOString()
       });
       
       if (!success) {
@@ -519,7 +522,7 @@ export const useSubmitAnswer = () => {
       // Резервный вариант: попробовать отправить ответ через HTTP API
       try {
         await apiClient.post(`/quizzes/${quizId}/questions/${questionId}/answer`, {
-          option_id: answerId
+          optionId: answerId
         });
         return true;
       } catch (httpError) {
