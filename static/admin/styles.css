@@ -1,0 +1,453 @@
+/* Основные стили */
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    line-height: 1.6;
+    color: #333;
+    background-color: #f8f9fa;
+}
+
+.app {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px 0;
+    border-bottom: 1px solid #e9ecef;
+    margin-bottom: 30px;
+}
+
+h1, h2, h3 {
+    color: #2c3e50;
+    margin-bottom: 20px;
+}
+
+.main-container {
+    background-color: #fff;
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+    padding: 30px;
+}
+
+/* Формы */
+.form-group {
+    margin-bottom: 20px;
+}
+
+label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 500;
+}
+
+input, textarea, select {
+    width: 100%;
+    padding: 10px;
+    border: 1px solid #ced4da;
+    border-radius: 4px;
+    font-size: 16px;
+}
+
+input:focus, textarea:focus, select:focus {
+    outline: none;
+    border-color: #4dabf7;
+}
+
+/* Кнопки */
+.btn {
+    display: inline-block;
+    background-color: #e9ecef;
+    color: #495057;
+    border: none;
+    border-radius: 4px;
+    padding: 10px 15px;
+    font-size: 16px;
+    cursor: pointer;
+    transition: all 0.3s;
+}
+
+.btn:hover {
+    background-color: #dee2e6;
+}
+
+.btn-primary {
+    background-color: #4dabf7;
+    color: white;
+}
+
+.btn-primary:hover {
+    background-color: #3793dd;
+}
+
+.btn-danger {
+    background-color: #ff6b6b;
+    color: white;
+}
+
+.btn-danger:hover {
+    background-color: #fa5252;
+}
+
+/* Навигация */
+nav ul {
+    list-style: none;
+    display: flex;
+    gap: 20px;
+    margin-bottom: 30px;
+}
+
+.nav-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 16px;
+    color: #495057;
+    padding: 8px 0;
+    position: relative;
+}
+
+.nav-btn:after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 0;
+    height: 2px;
+    background-color: #4dabf7;
+    transition: width 0.3s;
+}
+
+.nav-btn:hover:after, .nav-btn.active:after {
+    width: 100%;
+}
+
+.nav-btn.active {
+    color: #4dabf7;
+    font-weight: 500;
+}
+
+/* Секции */
+.section {
+    margin-bottom: 40px;
+}
+
+.back-button {
+    margin-bottom: 20px;
+}
+
+/* Список викторин */
+#quizzes-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 20px;
+}
+
+.quiz-card {
+    border: 1px solid #e9ecef;
+    border-radius: 8px;
+    padding: 20px;
+    transition: transform 0.3s, box-shadow 0.3s;
+    cursor: pointer;
+}
+
+.quiz-card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 10px 20px rgba(0, 0, 0, 0.1);
+}
+
+.quiz-card h3 {
+    margin-bottom: 10px;
+}
+
+.quiz-status {
+    display: inline-block;
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    margin-bottom: 10px;
+}
+
+.status-scheduled {
+    background-color: #4dabf7;
+    color: white;
+}
+
+.status-in_progress {
+    background-color: #ffd43b;
+    color: #212529;
+}
+
+.status-completed {
+    background-color: #20c997;
+    color: white;
+}
+
+.status-cancelled {
+    background-color: #ff6b6b;
+    color: white;
+}
+
+/* Детали викторины */
+#quiz-info {
+    margin-bottom: 30px;
+}
+
+.quiz-info-item {
+    margin-bottom: 15px;
+}
+
+.quiz-info-item strong {
+    display: inline-block;
+    width: 180px;
+}
+
+.quiz-controls {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 30px;
+}
+
+/* Вопросы */
+.question-item {
+    border: 1px solid #e9ecef;
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 20px;
+}
+
+#add-more-question {
+    margin-right: 15px;
+    margin-bottom: 20px;
+}
+
+/* Результаты */
+.results-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 20px;
+}
+
+.results-table th, .results-table td {
+    border: 1px solid #e9ecef;
+    padding: 10px;
+    text-align: left;
+}
+
+.results-table th {
+    background-color: #f1f3f5;
+}
+
+/* Вспомогательные классы */
+.hidden {
+    display: none;
+}
+
+.error-message {
+    color: #ff6b6b;
+    margin-top: 10px;
+}
+
+/* Toast для уведомлений */
+.toast {
+    position: fixed;
+    bottom: 30px;
+    right: 30px;
+    background-color: #4dabf7;
+    color: white;
+    padding: 15px 20px;
+    border-radius: 4px;
+    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+    z-index: 1000;
+    animation: fadeIn 0.3s, fadeOut 0.3s 2.7s;
+    transform: translateY(0);
+    opacity: 1;
+}
+
+.toast.success {
+    background-color: #20c997;
+}
+
+.toast.error {
+    background-color: #ff6b6b;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes fadeOut {
+    from {
+        opacity: 1;
+        transform: translateY(0);
+    }
+    to {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+}
+
+#restart-quiz-form {
+    background-color: #fff;
+    border-radius: 8px;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+    padding: 20px;
+    margin-top: 20px;
+}
+
+#restart-quiz-form h3 {
+    margin-top: 0;
+    color: #3498db;
+}
+
+.btn-info {
+    background-color: #3498db;
+    color: white;
+}
+
+.btn-info:hover {
+    background-color: #2980b9;
+}
+
+.form-hint {
+    display: block;
+    font-size: 12px;
+    color: #6c757d;
+    margin-top: 5px;
+}
+
+/* Стили для отладки токенов */
+#token-debug-section {
+    max-width: 900px;
+    margin: 0 auto;
+}
+
+#token-debug-form {
+    margin-bottom: 20px;
+    background-color: #f8f9fa;
+    padding: 20px;
+    border-radius: 5px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+#token-debug-form .form-group {
+    margin-bottom: 15px;
+}
+
+#token-debug-form textarea {
+    width: 100%;
+    font-family: monospace;
+    resize: vertical;
+}
+
+#token-debug-form .form-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 15px;
+}
+
+.token-debug-result {
+    background-color: #fff;
+    border: 1px solid #dee2e6;
+    border-radius: 5px;
+    padding: 20px;
+    margin-bottom: 20px;
+}
+
+.token-debug-result.hidden {
+    display: none;
+}
+
+.token-debug-result h3 {
+    margin-top: 0;
+    margin-bottom: 15px;
+    border-bottom: 1px solid #dee2e6;
+    padding-bottom: 10px;
+}
+
+.token-debug-result pre {
+    background-color: #f8f9fa;
+    padding: 10px;
+    border-radius: 4px;
+    overflow-x: auto;
+    font-size: 13px;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.token-section {
+    margin-bottom: 20px;
+}
+
+.token-section h4 {
+    margin-top: 0;
+    margin-bottom: 10px;
+    border-bottom: 1px dashed #e9ecef;
+    padding-bottom: 5px;
+    color: #495057;
+}
+
+.token-section ul {
+    padding-left: 20px;
+}
+
+.token-section li {
+    margin-bottom: 5px;
+}
+
+.token-status {
+    display: flex;
+    align-items: center;
+    background-color: #f8f9fa;
+    padding: 10px 15px;
+    border-radius: 4px;
+    margin-bottom: 15px;
+}
+
+.token-status-label {
+    font-weight: bold;
+    margin-right: 10px;
+}
+
+.status-valid {
+    color: #28a745;
+    font-weight: bold;
+}
+
+.status-expired {
+    color: #dc3545;
+    font-weight: bold;
+}
+
+.status-invalidated {
+    color: #fd7e14;
+    font-weight: bold;
+}
+
+.status-invalid {
+    color: #dc3545;
+    font-weight: bold;
+}
+
+.note {
+    font-size: 0.9em;
+    color: #6c757d;
+    font-style: italic;
+    margin-top: 10px;
+} 

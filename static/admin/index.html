@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Админ-панель Trivia Quiz</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="app">
+        <header>
+            <h1>Админ-панель Trivia Quiz</h1>
+            <div id="user-info">
+                <span id="username"></span>
+                <button id="logout-btn" class="btn btn-danger">Выйти</button>
+            </div>
+        </header>
+        
+        <div class="main-container">
+            <div id="login-section" class="section">
+                <h2>Вход в систему</h2>
+                <form id="login-form">
+                    <div class="form-group">
+                        <label for="email">Email:</label>
+                        <input type="email" id="email" name="email" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="password">Пароль:</label>
+                        <input type="password" id="password" name="password" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Войти</button>
+                </form>
+                <div id="login-error" class="error-message"></div>
+            </div>
+
+            <div id="admin-panel" class="hidden">
+                <nav>
+                    <ul>
+                        <li><button id="view-quizzes-btn" class="nav-btn active">Все викторины</button></li>
+                        <li><button id="create-quiz-btn" class="nav-btn">Создать викторину</button></li>
+                        <li><button id="reset-password-btn" class="nav-btn">Сброс пароля</button></li>
+                        <li><button id="manage-sessions-btn" class="nav-btn security-feature">Управление сессиями</button></li>
+                        <li><a href="ws-cluster-test.html">Тест кластеризации</a></li>
+                    </ul>
+                </nav>
+
+                <div id="quizzes-section" class="section">
+                    <h2>Список викторин</h2>
+                    <div id="quizzes-list"></div>
+                </div>
+
+                <div id="create-quiz-section" class="section hidden">
+                    <h2>Создать новую викторину</h2>
+                    <form id="create-quiz-form">
+                        <div class="form-group">
+                            <label for="quiz-title">Название:</label>
+                            <input type="text" id="quiz-title" name="title" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="quiz-description">Описание:</label>
+                            <textarea id="quiz-description" name="description" rows="3"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label for="quiz-scheduled-time">Запланированное время начала викторины:</label>
+                            <input type="datetime-local" id="quiz-scheduled-time" name="scheduled_time">
+                            <small class="form-hint">Если не указано, будет установлено на ближайшие 10 минут</small>
+                        </div>
+                        <button type="submit" class="btn btn-primary">Создать</button>
+                    </form>
+                </div>
+
+                <div id="reset-password-section" class="section hidden">
+                    <h2>Сброс пароля пользователя</h2>
+                    <p class="info-text">
+                        Используйте эту форму для сброса пароля пользователя в случае проблем с авторизацией. 
+                        Пользователь будет выйден из всех устройств после сброса.
+                    </p>
+                    <form id="reset-password-form">
+                        <div class="form-group">
+                            <label for="reset-email">Email пользователя:</label>
+                            <input type="email" id="reset-email" name="email" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="reset-new-password">Новый пароль:</label>
+                            <input type="text" id="reset-new-password" name="password" value="123456" required>
+                            <small class="form-hint">По умолчанию используется временный пароль "123456". Рекомендуйте пользователю сменить его после входа.</small>
+                        </div>
+                        <button type="submit" class="btn btn-warning">Сбросить пароль</button>
+                    </form>
+                    <div id="reset-result" class="result-message hidden"></div>
+                </div>
+
+                <div id="quiz-details-section" class="section hidden">
+                    <div class="back-button">
+                        <button id="back-to-quizzes" class="btn">← Назад к списку</button>
+                    </div>
+                    <h2 id="quiz-details-title"></h2>
+                    <div id="quiz-info"></div>
+                    
+                    <div class="action-buttons">
+                        <button id="back-to-quizzes-btn" class="btn btn-secondary">Назад к списку</button>
+                        <button id="schedule-quiz-btn" class="btn btn-primary">Запланировать время</button>
+                        <button id="cancel-quiz-btn" class="btn btn-warning">Отменить викторину</button>
+                        <button id="add-questions-btn" class="btn btn-success">Добавить вопросы</button>
+                        <button id="restart-quiz-btn" class="btn btn-info">Перезапустить викторину</button>
+                    </div>
+
+                    <div id="questions-list">
+                        <h3>Вопросы</h3>
+                        <div id="quiz-questions"></div>
+                        <div id="question-items"></div>
+                    </div>
+
+                    <div id="add-questions-form" class="hidden">
+                        <h3>Добавить вопросы</h3>
+                        <div id="questions-container">
+                            <div class="question-item">
+                                <div class="form-group">
+                                    <label>Текст вопроса:</label>
+                                    <input type="text" class="question-text" required>
+                                </div>
+                                <div class="form-group">
+                                    <label>Варианты ответов (по одному в строке):</label>
+                                    <textarea class="question-options" rows="4" required></textarea>
+                                </div>
+                                <div class="form-group">
+                                    <label>Правильный вариант (начиная с 0):</label>
+                                    <input type="number" class="question-correct-option" min="0" required>
+                                </div>
+                                <div class="form-group">
+                                    <label>Время на ответ (сек):</label>
+                                    <input type="number" class="question-time-limit" min="5" value="15" required>
+                                </div>
+                                <div class="form-group">
+                                    <label>Количество очков:</label>
+                                    <input type="number" class="question-points" min="1" value="10" required>
+                                </div>
+                            </div>
+                        </div>
+                        <button id="add-more-question" class="btn">+ Добавить еще вопрос</button>
+                        <button id="submit-questions" class="btn btn-primary">Сохранить вопросы</button>
+                    </div>
+
+                    <div id="schedule-quiz-form" class="hidden">
+                        <h3>Запланировать викторину</h3>
+                        <div class="form-group">
+                            <label for="schedule-time">Время начала:</label>
+                            <input type="datetime-local" id="schedule-time" required>
+                        </div>
+                        <button id="submit-schedule" class="btn btn-primary">Запланировать</button>
+                    </div>
+
+                    <div id="quiz-results-section" class="hidden">
+                        <h3>Результаты</h3>
+                        <div id="quiz-results"></div>
+                    </div>
+                </div>
+
+                <div id="restart-quiz-form" class="form-container hidden">
+                    <h3>Перезапуск викторины</h3>
+                    <div class="form-group">
+                        <label for="restart-time">Новое время проведения:</label>
+                        <input type="datetime-local" id="restart-time" required>
+                    </div>
+                    <div class="action-buttons">
+                        <button type="button" id="submit-restart" class="btn btn-primary">Перезапустить</button>
+                        <button type="button" id="cancel-restart" class="btn btn-secondary">Отмена</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="toast" class="toast hidden"></div>
+    </div>
+
+    <style>
+        .security-feature {
+            border-left: 3px solid #ff5722 !important;
+            color: #333 !important;
+            font-weight: 500 !important;
+            display: flex;
+            align-items: center;
+        }
+        .security-feature::before {
+            content: "🔐";
+            margin-right: 6px;
+        }
+    </style>
+
+    <!-- Сначала загружаем app.js как модуль -->
+    <script type="module" src="app.js"></script>
+    
+    <!-- Затем загружаем остальные скрипты -->
+    <script src="debug.js"></script>
+    <script src="token_debug.js"></script>
+    
+    <script>
+        // Обработчик для перехода на страницу управления сессиями
+        document.addEventListener('DOMContentLoaded', function() {
+            const manageSessionsBtn = document.getElementById('manage-sessions-btn');
+            if (manageSessionsBtn) {
+                manageSessionsBtn.addEventListener('click', function() {
+                    window.location.href = 'sessions.html';
+                });
+            }
+        });
+    </script>
+</body>
+</html> 

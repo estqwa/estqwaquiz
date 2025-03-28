@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Управление сессиями | Trivia API Admin</title>
+    <link rel="stylesheet" href="styles.css">
+    <script type="module" src="app.js"></script>
+    <script type="module">
+        import authService from './authService.js';
+
+        document.addEventListener('DOMContentLoaded', async () => {
+            // Проверяем авторизацию перед отображением страницы
+            await authService.init();
+            if (!authService.isAuthenticated()) {
+                window.location.href = 'index.html?showLogin=true';
+                return;
+            }
+
+            // Загружаем активные сессии
+            loadSessions();
+
+            // Привязка обработчика событий к кнопкам
+            document.getElementById('logout-all').addEventListener('click', logoutAllDevices);
+            
+            // Добавляем обработчик для кнопки возврата на главную страницу
+            document.getElementById('back-to-admin').addEventListener('click', function() {
+                window.location.href = 'index.html';
+            });
+        });
+
+        // Загрузка активных сессий
+        async function loadSessions() {
+            try {
+                const sessions = await authService.getActiveSessions();
+                renderSessions(sessions);
+            } catch (error) {
+                console.error('Ошибка при загрузке сессий:', error);
+                showError('Не удалось загрузить список активных сессий');
+            }
+        }
+
+        // Отображение списка сессий
+        function renderSessions(data) {
+            const sessionsContainer = document.getElementById('sessions-list');
+            sessionsContainer.innerHTML = '';
+
+            if (!data || !data.sessions || data.sessions.length === 0) {
+                sessionsContainer.innerHTML = '<p class="empty-message">Нет активных сессий</p>';
+                return;
+            }
+
+            const currentTime = new Date();
+            const sessions = data.sessions.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+            sessions.forEach(session => {
+                const createdDate = new Date(session.created_at);
+                const expiresDate = new Date(session.expires_at);
+                const isExpired = expiresDate < currentTime;
+                const isCurrent = session.id === authService.currentSessionId;
+
+                const sessionElement = document.createElement('div');
+                sessionElement.className = `session-item ${isExpired ? 'expired' : ''} ${isCurrent ? 'current' : ''}`;
+                
+                sessionElement.innerHTML = `
+                    <div class="session-info">
+                        <div class="session-header">
+                            <h3>${formatDeviceName(session.user_agent)}</h3>
+                            ${isCurrent ? '<span class="current-badge">Текущая сессия</span>' : ''}
+                        </div>
+                        <p><strong>IP:</strong> ${session.ip_address}</p>
+                        <p><strong>Устройство:</strong> ${session.user_agent}</p>
+                        <p><strong>Создана:</strong> ${formatDate(createdDate)}</p>
+                        <p><strong>Истекает:</strong> ${formatDate(expiresDate)}</p>
+                    </div>
+                    <div class="session-actions">
+                        ${!isCurrent ? `<button class="btn btn-danger session-logout" data-id="${session.id}">Завершить</button>` : ''}
+                    </div>
+                `;
+
+                // Добавляем обработчик для кнопки завершения сессии
+                const logoutButton = sessionElement.querySelector('.session-logout');
+                if (logoutButton) {
+                    logoutButton.addEventListener('click', () => terminateSession(session.id));
+                }
+
+                sessionsContainer.appendChild(sessionElement);
+            });
+        }
+
+        // Завершение конкретной сессии
+        async function terminateSession(sessionId) {
+            if (!confirm('Вы уверены, что хотите завершить эту сессию?')) {
+                return;
+            }
+
+            try {
+                await authService._authorizedRequest(`/api/auth/revoke-session`, {
+                    method: 'POST',
+                    body: JSON.stringify({ session_id: sessionId })
+                });
+                
+                showSuccess('Сессия успешно завершена');
+                loadSessions(); // Перезагружаем список
+            } catch (error) {
+                console.error('Ошибка при завершении сессии:', error);
+                showError('Не удалось завершить сессию');
+            }
+        }
+
+        // Завершение всех сессий
+        async function logoutAllDevices() {
+            if (!confirm('Вы уверены, что хотите завершить все сессии? Вам потребуется войти заново.')) {
+                return;
+            }
+
+            try {
+                await authService.logoutAllDevices();
+                // Перенаправление произойдет автоматически в authService
+            } catch (error) {
+                console.error('Ошибка при завершении всех сессий:', error);
+                showError('Не удалось завершить все сессии');
+            }
+        }
+
+        // Форматирование имени устройства из User-Agent
+        function formatDeviceName(userAgent) {
+            if (!userAgent) return 'Неизвестное устройство';
+
+            // Упрощенный алгоритм определения устройства и браузера
+            const isWindows = userAgent.includes('Windows');
+            const isMac = userAgent.includes('Macintosh');
+            const isLinux = userAgent.includes('Linux');
+            const isAndroid = userAgent.includes('Android');
+            const isIOS = userAgent.includes('iPhone') || userAgent.includes('iPad');
+
+            let device = 'Устройство';
+            if (isWindows) device = 'Windows';
+            else if (isMac) device = 'Mac';
+            else if (isLinux && !isAndroid) device = 'Linux';
+            else if (isAndroid) device = 'Android';
+            else if (isIOS) device = 'iOS';
+
+            // Определение браузера
+            let browser = '';
+            if (userAgent.includes('Chrome') && !userAgent.includes('Edg')) browser = 'Chrome';
+            else if (userAgent.includes('Firefox')) browser = 'Firefox';
+            else if (userAgent.includes('Safari') && !userAgent.includes('Chrome')) browser = 'Safari';
+            else if (userAgent.includes('Edg')) browser = 'Edge';
+            else if (userAgent.includes('MSIE') || userAgent.includes('Trident')) browser = 'Internet Explorer';
+            else browser = 'Браузер';
+
+            return `${device} / ${browser}`;
+        }
+
+        // Форматирование даты
+        function formatDate(date) {
+            return new Intl.DateTimeFormat('ru', {
+                day: '2-digit',
+                month: '2-digit',
+                year: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit'
+            }).format(date);
+        }
+
+        // Отображение сообщения об ошибке
+        function showError(message) {
+            const toast = document.createElement('div');
+            toast.className = 'toast toast-error';
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 5000);
+        }
+
+        // Отображение сообщения об успехе
+        function showSuccess(message) {
+            const toast = document.createElement('div');
+            toast.className = 'toast toast-success';
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 3000);
+        }
+    </script>
+    <style>
+        .sessions-container {
+            max-width: 900px;
+            margin: 20px auto;
+            padding: 20px;
+            background-color: #fff;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        
+        .sessions-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        
+        .sessions-title {
+            font-size: 24px;
+            margin: 0;
+        }
+        
+        .back-btn {
+            padding: 8px 16px;
+            background-color: #f0f0f0;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            font-weight: 500;
+        }
+        
+        .back-btn::before {
+            content: "←";
+            margin-right: 6px;
+            font-size: 16px;
+        }
+        
+        .back-btn:hover {
+            background-color: #e0e0e0;
+        }
+        
+        .session-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            margin-bottom: 15px;
+            background-color: #f9f9f9;
+        }
+        
+        .session-item.current {
+            border-color: #2196F3;
+            background-color: #E3F2FD;
+        }
+        
+        .session-item.expired {
+            opacity: 0.7;
+            background-color: #f5f5f5;
+        }
+        
+        .session-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        
+        .session-header h3 {
+            margin: 0;
+            margin-right: 10px;
+        }
+        
+        .current-badge {
+            background-color: #2196F3;
+            color: white;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        
+        .session-info {
+            flex: 1;
+        }
+        
+        .session-info p {
+            margin: 5px 0;
+            font-size: 14px;
+        }
+        
+        .session-actions {
+            display: flex;
+            align-items: center;
+        }
+        
+        .empty-message {
+            text-align: center;
+            font-style: italic;
+            color: #666;
+            padding: 20px;
+        }
+        
+        .btn-danger {
+            background-color: #e74c3c;
+            color: white;
+        }
+        
+        .btn-danger:hover {
+            background-color: #c0392b;
+        }
+        
+        .security-nav-item {
+            border-left: 3px solid #ff5722;
+            position: relative;
+        }
+        
+        .security-nav-item::before {
+            content: "🔐";
+            margin-right: 6px;
+        }
+        
+        .header-left {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 10px;
+        }
+        
+        .security-info {
+            background-color: #e3f2fd;
+            border-left: 4px solid #2196F3;
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <nav>
+            <div class="logo">Trivia API Admin</div>
+            <ul>
+                <li><a href="index.html">Админ-панель</a></li>
+                <li><a href="sessions.html" class="active security-nav-item">Управление сессиями</a></li>
+                <li><a href="ws-cluster-test.html">Тест кластеризации</a></li>
+                <li><a href="#" id="logout-btn">Выход</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main>
+        <div class="sessions-container">
+            <div class="sessions-header">
+                <div class="header-left">
+                    <button id="back-to-admin" class="back-btn">Назад к админ-панели</button>
+                    <h1 class="sessions-title">Управление активными сессиями</h1>
+                </div>
+                <button id="logout-all" class="btn btn-danger">Выйти со всех устройств</button>
+            </div>
+            
+            <div class="info-box security-info">
+                <p><strong>🔐 Функция безопасности:</strong> Здесь вы можете просмотреть и управлять своими активными сессиями. Регулярная проверка активных сессий помогает обнаружить несанкционированный доступ и защитить ваш аккаунт.</p>
+                <p>Вы можете завершить отдельные сессии или выйти сразу со всех устройств в случае подозрительной активности.</p>
+            </div>
+            
+            <div id="sessions-list" class="sessions-list">
+                <div class="loading">Загрузка активных сессий...</div>
+            </div>
+        </div>
+    </main>
+
+    <footer>
+        <p>&copy; 2023 Trivia API Admin Panel</p>
+    </footer>
+</body>
+</html> 

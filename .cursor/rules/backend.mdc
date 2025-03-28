@@ -1,0 +1,57 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Your rule content
+# Files Cursor can access for context
+
+- You can [api_reference.md](mdc:docs/api_reference.md)
+- You can [apiws-md.md](mdc:docs/apiws-md.md)
+- You can [auth_system.md](mdc:docs/auth_system.md)
+- You can [database_schema.md](mdc:docs/database_schema.md)
+- You can [quiz_manager.md](mdc:docs/quiz_manager.md)
+- You can [websocket_advanced.md](mdc:docs/websocket_advanced.md)
+- You can [websocket_connection_guide.md](mdc:docs/websocket_connection_guide.md)
+- You can [websocket_events.md](mdc:docs/websocket_events.md)
+- You can [frontend_architecture.md](mdc:docs/frontend_architecture.md)
+
+# Rule: Frontend Development for Trivia API (React/Next.js)
+# Detailed instructions for generating frontend code
+
+# Правило: Разработка Фронтенда для Trivia API (React/Next.js)
+
+**1. Основное Руководство:**
+   - Всегда используй @frontend_architecture.md как **главный источник** для:
+     - Выбора технологического стека (**React, Next.js, TypeScript, React Query, Redux Toolkit, Axios, TailwindCSS, Custom WS Client**).
+     - Структуры проекта (расположение папок и файлов).
+     - Общих паттернов (управление состоянием, кэширование, обработка ошибок, оптимизации).
+     - Примеров реализации базовых клиентов (HTTP, WebSocket) и компонентов.
+
+**2. Ссылка на Детали Бэкенда (Обязательно сверяйся при генерации):**
+   - **При создании HTTP API запросов** (в `src/api/services/`, хуках React Query `src/hooks/api-hooks.ts`):
+     - **Сверяйся с @api_reference.md** для точных эндпоинтов, методов HTTP, параметров запроса и форматов ответа.
+     - Учитывай логику аутентификации (Cookie+CSRF / Bearer), описанную в @auth_system.md и реализованную в Axios интерцепторе из @frontend_architecture.md.
+   - **При реализации WebSocket** (в `src/api/websocket/client.ts`, хуках `src/hooks/websocket-hooks.ts`, обработчиках в `_app.tsx` или компонентах, Redux-слайсах `quiz` и `websocket`):
+     - **Сверяйся с @apiws-md.md** для общей информации о WS API.
+     - **Сверяйся с @websocket_events.md** для **конкретных типов сообщений** (входящих и исходящих), их структуры (`data`) и ожидаемого поведения.
+     - Используй @websocket_connection_guide.md для понимания процесса подключения/аутентификации WS.
+     - Учитывай продвинутые концепции (шардинг, кластеризация, если это влияет на клиент) из @websocket_advanced.md.
+     - Используй реализацию `WebSocketClient` из @frontend_architecture.md как основу.
+   - **При реализации функций Аутентификации** (компоненты в `src/components/auth/`, страницы в `src/pages/auth/`, логика в `src/store/auth/slice.ts`, Axios-интерцепторы):
+     - **Сверяйся с @auth_system.md** для понимания механизмов JWT, Refresh токенов, CSRF, инвалидации, управления сессиями.
+     - **Сверяйся с @api_reference.md** для конкретных эндпоинтов аутентификации (`/login`, `/register`, `/refresh`, `/logout` и т.д.).
+     - Реализуй поддержку **обоих режимов аутентификации** (Cookie и Bearer), как описано в @frontend_architecture.md и @auth_system.md.
+   - **При определении TypeScript Типов** (в `src/types/`):
+     - **Основывайся на @database_schema.md** для структуры основных сущностей.
+     - **Дополняй и уточняй типы** на основе **реальных форматов ответа** API, описанных в @api_reference.md и @websocket_events.md. *Типы в @frontend_architecture.md являются хорошей отправной точкой, но финальные типы должны соответствовать бэкенду.*
+   - **При реализации логики Викторин** (компоненты в `src/components/quiz/`, Redux-слайс `src/store/quiz/slice.ts`):
+     - Используй @quiz_manager.md для понимания жизненного цикла викторины, смены состояний и логики подсчета очков/результатов.
+     - Используй @websocket_events.md для обработки сообщений, управляющих викториной (`QUIZ_START`, `QUESTION_START`, `USER_ANSWER`, `RESULT_UPDATE` и т.д.).
+     - Используй @api_reference.md для запросов деталей викторины, результатов и т.д. через React Query.
+
+**3. Обработка Файлов:**
+   - **ВАЖНО:** При анализе предоставленных @-файлов, особенно больших документов с описанием бэкенда (@api_reference.md, @auth_system.md и т.д.), **читай и обрабатывай их последовательно, логическими блоками примерно по 200 строк за раз**. Это поможет избежать потери контекста и обеспечит более точное использование информации. После анализа блока, приступай к следующему.
+
+**4. Цель Генерации:**
+   - Генерируй код для фронтенд-приложения Trivia API, строго следуя архитектуре и стеку из @frontend_architecture.md, но **всегда проверяя и используя актуальные детали реализации бэкенда** из соответствующих файлов (@api_reference.md, @websocket_events.md, @auth_system.md и т.д.) для конкретной реализуемой функции.

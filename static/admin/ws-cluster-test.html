@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Тестирование кластеризации WebSocket | Trivia API Admin</title>
+    <link rel="stylesheet" href="styles.css">
+    <style>
+        .container {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .server {
+            border: 1px solid #ccc;
+            padding: 15px;
+            border-radius: 5px;
+            background-color: #fff;
+        }
+        .server h2 {
+            margin-top: 0;
+        }
+        .log {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 5px;
+            height: 300px;
+            overflow-y: auto;
+            font-size: 12px;
+            font-family: monospace;
+        }
+        .log-entry {
+            margin-bottom: 5px;
+            padding: 3px;
+            border-bottom: 1px solid #ddd;
+        }
+        .control-panel {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #f9f9f9;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .error {
+            color: red;
+        }
+        .success {
+            color: green;
+        }
+        .warning {
+            color: orange;
+        }
+        .received {
+            color: blue;
+        }
+        .sent {
+            color: purple;
+        }
+        .auth-status {
+            margin-bottom: 10px;
+            padding: 10px;
+            border-radius: 5px;
+            background-color: #f0f0f0;
+        }
+    </style>
+</head>
+<body>
+    <div class="admin-container">
+        <div class="admin-sidebar">
+            <div class="sidebar-header">
+                <h2>Trivia API</h2>
+                <p>Панель администратора</p>
+            </div>
+            <nav class="sidebar-nav">
+                <ul>
+                    <li><a href="index.html">Главная</a></li>
+                    <li><a href="sessions.html">Токены</a></li>
+                    <li><a href="ws-cluster-test.html" class="active">Тест кластеризации</a></li>
+                </ul>
+            </nav>
+            <div class="sidebar-footer">
+                <p>Пользователь: <span id="currentUser">...</span></p>
+                <button id="logoutBtn" class="btn-logout">Выйти</button>
+            </div>
+        </div>
+        
+        <div class="admin-content">
+            <header class="content-header">
+                <h1>Тестирование кластеризации WebSocket</h1>
+                <p>Этот инструмент помогает проверить работу кластеризации WebSocket с использованием Redis.</p>
+            </header>
+            
+            <div class="auth-status" id="authStatus">
+                Статус: <span id="authStatusText">Проверка авторизации...</span>
+            </div>
+            
+            <div class="content-body">
+                <div class="control-panel">
+                    <h3>Управление соединениями</h3>
+                    <div>
+                        <button id="connectAll" class="btn-primary">Подключить все</button>
+                        <button id="disconnectAll" class="btn-secondary">Отключить все</button>
+                        <button id="clearLogs" class="btn-secondary">Очистить логи</button>
+                    </div>
+                    <div style="margin-top: 15px;">
+                        <button id="sendMessage" class="btn-primary">Отправить широковещательное сообщение</button>
+                        <input type="text" id="messageInput" placeholder="Текст сообщения">
+                        <select id="sourceServer">
+                            <option value="0">Сервер 1 (8080)</option>
+                            <option value="1">Сервер 2 (8081)</option>
+                            <option value="2">Сервер 3 (8082)</option>
+                        </select>
+                    </div>
+                    <div style="margin-top: 15px;">
+                        <button id="testClustering" class="btn-primary">Тест кластеризации</button>
+                        <span id="testResult"></span>
+                    </div>
+                </div>
+                
+                <div class="container">
+                    <div class="server" id="server0">
+                        <h2>Сервер 1 (порт 8080)</h2>
+                        <div>
+                            <span class="status">Статус: </span>
+                            <span class="status-value">Отключен</span>
+                            <button class="connect btn-success">Подключить</button>
+                            <button class="disconnect btn-warning" disabled>Отключить</button>
+                        </div>
+                        <div class="log"></div>
+                    </div>
+                    
+                    <div class="server" id="server1">
+                        <h2>Сервер 2 (порт 8081)</h2>
+                        <div>
+                            <span class="status">Статус: </span>
+                            <span class="status-value">Отключен</span>
+                            <button class="connect btn-success">Подключить</button>
+                            <button class="disconnect btn-warning" disabled>Отключить</button>
+                        </div>
+                        <div class="log"></div>
+                    </div>
+                    
+                    <div class="server" id="server2">
+                        <h2>Сервер 3 (порт 8082)</h2>
+                        <div>
+                            <span class="status">Статус: </span>
+                            <span class="status-value">Отключен</span>
+                            <button class="connect btn-success">Подключить</button>
+                            <button class="disconnect btn-warning" disabled>Отключить</button>
+                        </div>
+                        <div class="log"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script type="module">
+        // Импортируем authService как ES модуль
+        import authService from './authService.js';
+        
+        // Конфигурация серверов
+        const servers = [
+            { port: 8080, ws: null, connected: false, token: '' },
+            { port: 8081, ws: null, connected: false, token: '' },
+            { port: 8082, ws: null, connected: false, token: '' }
+        ];
+        
+        // Инициализация и проверка авторизации
+        document.addEventListener('DOMContentLoaded', async function() {
+            // Инициализируем authService и проверяем авторизацию
+            await initializeAuth();
+            
+            // Получаем токены для каждого сервера
+            await getTokensForServers();
+            
+            // Обработчики кнопок для каждого сервера
+            servers.forEach((server, index) => {
+                const serverEl = document.getElementById(`server${index}`);
+                const connectBtn = serverEl.querySelector('.connect');
+                const disconnectBtn = serverEl.querySelector('.disconnect');
+                
+                connectBtn.addEventListener('click', () => connectToServer(index));
+                disconnectBtn.addEventListener('click', () => disconnectFromServer(index));
+            });
+            
+            // Глобальные кнопки управления
+            document.getElementById('connectAll').addEventListener('click', connectAllServers);
+            document.getElementById('disconnectAll').addEventListener('click', disconnectAllServers);
+            document.getElementById('clearLogs').addEventListener('click', clearAllLogs);
+            document.getElementById('sendMessage').addEventListener('click', sendBroadcastMessage);
+            document.getElementById('testClustering').addEventListener('click', testClustering);
+            document.getElementById('logoutBtn').addEventListener('click', () => {
+                if (confirm('Вы уверены, что хотите выйти?')) {
+                    authService.logout();
+                    window.location.href = 'index.html';
+                }
+            });
+        });
+        
+        // Инициализация авторизации
+        async function initializeAuth() {
+            try {
+                // Инициализируем сервис аутентификации
+                await authService.init();
+                
+                // Проверяем аутентификацию
+                if (!authService.isAuthenticated()) {
+                    // Пользователь не авторизован, перенаправляем на страницу входа
+                    document.getElementById('authStatusText').textContent = 'Не авторизован';
+                    document.getElementById('authStatus').style.backgroundColor = '#f8d7da';
+                    alert('Вы не авторизованы. Перенаправление на страницу входа.');
+                    window.location.href = 'index.html';
+                    return;
+                }
+                
+                // Получаем информацию о пользователе через свойство user
+                if (authService.user) {
+                    // Пользователь авторизован
+                    document.getElementById('currentUser').textContent = authService.user.username || authService.user.email;
+                    document.getElementById('authStatusText').textContent = `Авторизован как ${authService.user.username || authService.user.email}`;
+                    document.getElementById('authStatus').style.backgroundColor = '#d4edda';
+                } else {
+                    // Если свойство user отсутствует, показываем общее сообщение
+                    document.getElementById('currentUser').textContent = 'Администратор';
+                    document.getElementById('authStatusText').textContent = 'Авторизован';
+                    document.getElementById('authStatus').style.backgroundColor = '#d4edda';
+                }
+                
+                if (authService.accessToken) {
+                    console.log('Токен авторизации получен');
+                } else {
+                    console.error('Не удалось получить токен авторизации');
+                    document.getElementById('authStatusText').textContent = 'Ошибка получения токена';
+                    document.getElementById('authStatus').style.backgroundColor = '#f8d7da';
+                }
+            } catch (error) {
+                console.error('Ошибка при проверке авторизации:', error);
+                document.getElementById('authStatusText').textContent = `Ошибка: ${error.message}`;
+                document.getElementById('authStatus').style.backgroundColor = '#f8d7da';
+            }
+        }
+        
+        // Получение токенов для всех серверов
+        async function getTokensForServers() {
+            try {
+                // Используем один и тот же токен для всех серверов
+                const token = authService.accessToken;
+                if (!token) {
+                    throw new Error('Токен авторизации не получен');
+                }
+                
+                // Устанавливаем токен для каждого сервера
+                servers.forEach((server, index) => {
+                    server.token = token;
+                    logToServer(index, 'Токен из authService установлен', 'info');
+                });
+            } catch (error) {
+                console.error('Ошибка при установке токенов:', error);
+                alert('Ошибка получения токенов. Пожалуйста, обновите страницу или войдите заново.');
+            }
+        }
+        
+        // Получение токена для конкретного сервера - эта функция больше не используется,
+        // так как мы используем один токен для всех серверов
+        // Оставлена для возможности дальнейшей модификации
+        async function getTokenForServer(port) {
+            try {
+                // В данной версии просто возвращаем текущий токен
+                return authService.accessToken;
+                
+                /* 
+                // Этот код можно раскомментировать, если понадобится получать разные токены
+                const response = await fetch(`http://localhost:${port}/api/auth/login`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        email: 'temirlan@mail.ru',
+                        password: 'admin123'
+                    }),
+                    credentials: 'include'
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`Ошибка при получении токена: ${response.status} ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                return data.access_token;
+                */
+            } catch (error) {
+                console.error(`Ошибка при авторизации на сервере ${port}:`, error);
+                return authService.accessToken;
+            }
+        }
+        
+        // Функция для подключения к серверу
+        function connectToServer(serverIndex) {
+            const server = servers[serverIndex];
+            
+            if (!server.token) {
+                alert(`Ошибка авторизации для сервера ${server.port}. Обновите страницу или войдите заново.`);
+                return;
+            }
+            
+            const serverEl = document.getElementById(`server${serverIndex}`);
+            const statusEl = serverEl.querySelector('.status-value');
+            const connectBtn = serverEl.querySelector('.connect');
+            const disconnectBtn = serverEl.querySelector('.disconnect');
+            
+            // Отключаемся если уже подключены
+            if (server.ws) {
+                server.ws.close();
+            }
+            
+            statusEl.textContent = 'Подключение...';
+            logToServer(serverIndex, 'Подключение к WebSocket...', 'info');
+            
+            try {
+                // Создаем WebSocket соединение с токеном
+                const wsUrl = `ws://localhost:${server.port}/ws?token=${encodeURIComponent(server.token)}`;
+                server.ws = new WebSocket(wsUrl);
+                
+                // Обработчики событий WebSocket
+                server.ws.onopen = function() {
+                    server.connected = true;
+                    statusEl.textContent = 'Подключен';
+                    statusEl.className = 'status-value success';
+                    connectBtn.disabled = true;
+                    disconnectBtn.disabled = false;
+                    logToServer(serverIndex, 'Соединение установлено', 'success');
+                };
+                
+                server.ws.onmessage = function(event) {
+                    logToServer(serverIndex, `Получено сообщение: ${event.data}`, 'received');
+                };
+                
+                server.ws.onerror = function(error) {
+                    logToServer(serverIndex, `Ошибка: ${error.message || 'Неизвестная ошибка'}`, 'error');
+                };
+                
+                server.ws.onclose = function() {
+                    server.connected = false;
+                    statusEl.textContent = 'Отключен';
+                    statusEl.className = 'status-value';
+                    connectBtn.disabled = false;
+                    disconnectBtn.disabled = true;
+                    logToServer(serverIndex, 'Соединение закрыто', 'warning');
+                    server.ws = null;
+                };
+            } catch (error) {
+                statusEl.textContent = 'Ошибка подключения';
+                statusEl.className = 'status-value error';
+                logToServer(serverIndex, `Ошибка подключения: ${error.message}`, 'error');
+            }
+        }
+        
+        // Функция для отключения от сервера
+        function disconnectFromServer(serverIndex) {
+            const server = servers[serverIndex];
+            if (server.ws && server.connected) {
+                server.ws.close();
+                // Остальные обновления UI происходят в обработчике onclose
+                logToServer(serverIndex, 'Инициировано отключение', 'info');
+            }
+        }
+        
+        // Добавление записи в лог сервера
+        function logToServer(serverIndex, message, type) {
+            const serverEl = document.getElementById(`server${serverIndex}`);
+            const logEl = serverEl.querySelector('.log');
+            
+            const logEntry = document.createElement('div');
+            logEntry.classList.add('log-entry');
+            if (type) {
+                logEntry.classList.add(type);
+            }
+            
+            const timestamp = new Date().toLocaleTimeString();
+            logEntry.innerHTML = `<span>[${timestamp}]</span> ${message}`;
+            
+            logEl.appendChild(logEntry);
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+        
+        // Подключение ко всем серверам
+        function connectAllServers() {
+            servers.forEach((server, index) => {
+                if (!server.connected) {
+                    connectToServer(index);
+                }
+            });
+        }
+        
+        // Отключение от всех серверов
+        function disconnectAllServers() {
+            servers.forEach((server, index) => {
+                if (server.connected) {
+                    disconnectFromServer(index);
+                }
+            });
+        }
+        
+        // Очистка всех логов
+        function clearAllLogs() {
+            servers.forEach((server, index) => {
+                const serverEl = document.getElementById(`server${index}`);
+                const logEl = serverEl.querySelector('.log');
+                logEl.innerHTML = '';
+            });
+        }
+        
+        // Отправка широковещательного сообщения
+        function sendBroadcastMessage() {
+            const messageInput = document.getElementById('messageInput');
+            const sourceServerIndex = document.getElementById('sourceServer').value;
+            const message = messageInput.value.trim();
+            
+            if (!message) {
+                alert('Пожалуйста, введите сообщение');
+                return;
+            }
+            
+            if (!servers[sourceServerIndex].connected) {
+                alert(`Сервер ${parseInt(sourceServerIndex) + 1} не подключен!`);
+                return;
+            }
+            
+            // Формируем JSON-сообщение
+            const payload = {
+                type: 'broadcast',
+                message: message,
+                sender: `Тест кластеризации - Сервер ${parseInt(sourceServerIndex) + 1}`
+            };
+            
+            // Отправляем сообщение на выбранный сервер
+            servers[sourceServerIndex].ws.send(JSON.stringify(payload));
+            logToServer(sourceServerIndex, `Отправлено широковещательное сообщение: ${message}`, 'sent');
+            
+            // Очищаем поле ввода
+            messageInput.value = '';
+        }
+        
+        // Тестирование кластеризации
+        function testClustering() {
+            const testResultEl = document.getElementById('testResult');
+            testResultEl.textContent = 'Тестирование...';
+            testResultEl.className = '';
+            
+            // Проверяем, что все серверы подключены
+            const allConnected = servers.every(server => server.connected);
+            if (!allConnected) {
+                testResultEl.textContent = 'Ошибка: не все серверы подключены';
+                testResultEl.className = 'error';
+                return;
+            }
+            
+            // Очищаем все логи перед тестом
+            clearAllLogs();
+            
+            // Настраиваем тест - отправляем сообщение с первого сервера
+            const testMessage = `Тестовое сообщение кластера - ${new Date().toISOString()}`;
+            const sourceIndex = 0;
+            
+            // Создаем флаги для проверки получения сообщений
+            const messageReceived = [false, false, false];
+            
+            // Настраиваем обработчики для проверки получения сообщений
+            servers.forEach((server, index) => {
+                const originalOnMessage = server.ws.onmessage;
+                
+                server.ws.onmessage = function(event) {
+                    // Вызываем оригинальный обработчик
+                    originalOnMessage(event);
+                    
+                    // Проверяем, содержит ли сообщение тестовый текст
+                    if (event.data.includes(testMessage)) {
+                        messageReceived[index] = true;
+                        
+                        // Проверяем, получили ли все серверы сообщение
+                        if (messageReceived.every(received => received)) {
+                            // Сообщение успешно получено всеми серверами!
+                            testResultEl.textContent = 'Тест успешен! Кластеризация работает корректно.';
+                            testResultEl.className = 'success';
+                        }
+                    }
+                };
+            });
+            
+            // Отправляем тестовое сообщение
+            const payload = {
+                type: 'broadcast',
+                message: testMessage,
+                sender: 'Системный тест кластеризации'
+            };
+            
+            servers[sourceIndex].ws.send(JSON.stringify(payload));
+            logToServer(sourceIndex, `Отправлено тестовое сообщение: ${testMessage}`, 'sent');
+            
+            // Устанавливаем таймаут для проверки результата
+            setTimeout(() => {
+                // Возвращаем оригинальные обработчики onmessage
+                servers.forEach((server, index) => {
+                    if (server.ws) {
+                        server.ws.onmessage = function(event) {
+                            logToServer(index, `Получено сообщение: ${event.data}`, 'received');
+                        };
+                    }
+                });
+                
+                // Проверяем результат теста
+                if (!messageReceived.every(received => received)) {
+                    const failedServers = messageReceived
+                        .map((received, idx) => !received ? idx + 1 : null)
+                        .filter(idx => idx !== null);
+                    
+                    testResultEl.textContent = `Тест не пройден. Сервер(ы) ${failedServers.join(', ')} не получили сообщение.`;
+                    testResultEl.className = 'error';
+                }
+            }, 5000); // Даем 5 секунд на получение сообщений
+        }
+    </script>
+</body>
+</html> 
