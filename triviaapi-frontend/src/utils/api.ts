@@ -127,17 +127,22 @@ export const transformKeysToSnakeCase = <T extends unknown>(obj: T): T => {
  * @returns объект с ключами в camelCase
  */
 export const transformKeysToCamelCase = <T extends unknown>(obj: T): T => {
+  console.log('[transformKeysToCamelCase] Input:', JSON.stringify(obj));
+  
   if (obj === null || obj === undefined || typeof obj !== 'object') {
     return obj;
   }
 
   if (Array.isArray(obj)) {
-    return obj.map(transformKeysToCamelCase) as unknown as T;
+    const mappedArray = obj.map(transformKeysToCamelCase);
+    console.log('[transformKeysToCamelCase] Array mapped:', JSON.stringify(mappedArray));
+    return mappedArray as unknown as T;
   }
 
   return Object.entries(obj).reduce((acc, [key, value]) => {
     const camelKey = snakeToCamelCase(key);
     acc[camelKey] = transformKeysToCamelCase(value);
+    console.log('[transformKeysToCamelCase] Object accumulator:', JSON.stringify(acc));
     return acc;
   }, {} as Record<string, any>) as T;
 }; 
