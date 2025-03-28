@@ -104,8 +104,11 @@ const PlayPage: NextPage = () => {
   
   // Если нет активной викторины, но есть запланированная, показываем информацию о ней
   if (nextScheduledQuiz) {
-    // Проверяем наличие scheduled_time или start_time и создаем объект Date
-    const scheduledTimeStr = nextScheduledQuiz.scheduled_time || nextScheduledQuiz.start_time;
+    // Преобразуем quiz для работы с camelCase полями
+    const quiz = nextScheduledQuiz as any;
+    
+    // Проверяем наличие scheduledTime или startTime и создаем объект Date
+    const scheduledTimeStr = quiz.scheduledTime || quiz.startTime;
     const startTime = scheduledTimeStr ? new Date(scheduledTimeStr) : null;
     
     // Расчет оставшегося времени только если startTime валидный
@@ -128,21 +131,21 @@ const PlayPage: NextPage = () => {
         <div className="bg-white p-8 rounded-lg shadow-md">
           <h2 className="text-2xl font-bold mb-4">Следующая викторина:</h2>
           <div className="mb-6">
-            <h3 className="text-xl font-semibold">{nextScheduledQuiz.title}</h3>
-            <p className="text-gray-600 mt-2">{nextScheduledQuiz.description}</p>
+            <h3 className="text-xl font-semibold">{quiz.title}</h3>
+            <p className="text-gray-600 mt-2">{quiz.description}</p>
             <div className="mt-4 p-4 bg-blue-50 rounded-md">
               <p className="font-medium">Начало через: {hoursUntilStart}ч {minutesUntilStart}мин</p>
               <p>Дата и время начала: {formattedStartTime}</p>
-              <p className="mt-2">Количество вопросов: {nextScheduledQuiz.question_count || 'Не указано'}</p>
+              <p className="mt-2">Количество вопросов: {quiz.questionCount || 'Не указано'}</p>
               
-              {nextScheduledQuiz.duration_minutes && (
-                <p className="mt-1">Продолжительность: {nextScheduledQuiz.duration_minutes} минут</p>
+              {quiz.durationMinutes && (
+                <p className="mt-1">Продолжительность: {quiz.durationMinutes} минут</p>
               )}
               
-              {nextScheduledQuiz.difficulty && (
+              {quiz.difficulty && (
                 <p className="mt-1">Сложность: {
-                  nextScheduledQuiz.difficulty === 'easy' ? 'Лёгкая' :
-                  nextScheduledQuiz.difficulty === 'medium' ? 'Средняя' : 'Сложная'
+                  quiz.difficulty === 'easy' ? 'Лёгкая' :
+                  quiz.difficulty === 'medium' ? 'Средняя' : 'Сложная'
                 }</p>
               )}
             </div>
