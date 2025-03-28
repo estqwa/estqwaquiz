@@ -64,7 +64,9 @@ export const createApiClient = (config?: AxiosRequestConfig): AxiosInstance => {
     (response) => {
       // Преобразуем данные из snake_case в camelCase при получении от сервера
       if (response.data) {
+        console.log('[Axios Interceptor] Response data BEFORE transform:', JSON.stringify(response.data));
         response.data = transformKeysToCamelCase(response.data);
+        console.log('[Axios Interceptor] Response data AFTER transform:', JSON.stringify(response.data));
       }
       return response;
     },
