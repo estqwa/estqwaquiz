@@ -4,6 +4,7 @@ import { Quiz } from '../../types/quiz';
 import { Question } from '../../types/question';
 import { UserQuizResult } from '../../types/result';
 import { useCallback } from 'react';
+import { apiClient } from '../../api/http/client';
 
 // Ключи запросов для React Query
 export const quizKeys = {
@@ -107,27 +108,34 @@ export const useNextScheduledQuiz = (options?: UseQueryOptions<Quiz | null, Erro
   return useQuery({
     queryKey: [...quizKeys.scheduled(), 'next'],
     queryFn: async () => {
-      console.log('Fetching scheduled quizzes');
+      console.log('[useNextScheduledQuiz queryFn] Fetching scheduled quizzes directly...');
       try {
-        const quizzes = await quizService.getScheduledQuizzes();
-        console.log('Scheduled quizzes received:', quizzes);
-        
+        // Прямой вызов apiClient, ИНТЕРЦЕПТОРЫ Axios отработают
+        const response = await apiClient.get<Quiz[]>('/quizzes/scheduled');
+
+        // Логируем то, что пришло СРАЗУ после Axios (и его интерцепторов)
+        console.log('[useNextScheduledQuiz queryFn] Received response.data:', JSON.stringify(response.data));
+
+        const quizzes = response.data; // Данные УЖЕ должны быть camelCase после интерцептора
+
+        // Оставляем остальную логику обработки (сортировка, возврат null или первого элемента)
         if (!quizzes || quizzes.length === 0) {
-          console.log('No scheduled quizzes available');
+          console.log('[useNextScheduledQuiz queryFn] No scheduled quizzes available');
           return null;
         }
-        
-        // Сортируем по времени начала (от ближайшего)
+
         const sortedQuizzes = quizzes.sort((a, b) => {
-          const timeA = new Date(a.start_time || a.scheduled_time || '').getTime();
-          const timeB = new Date(b.start_time || b.scheduled_time || '').getTime();
+          const timeA = new Date(a.start_time || a.scheduled_time || '').getTime(); // Используем поля в формате snake_case (согласно типу Quiz)
+          const timeB = new Date(b.start_time || b.scheduled_time || '').getTime(); // Используем поля в формате snake_case (согласно типу Quiz)
           return timeA - timeB;
         });
-        
-        console.log('Next scheduled quiz:', sortedQuizzes[0]);
-        return sortedQuizzes[0];
+
+        console.log('[useNextScheduledQuiz queryFn] Next scheduled quiz (after sort):', sortedQuizzes[0]);
+        return sortedQuizzes[0]; // Возвращаем первый (ближайший)
+
       } catch (error) {
-        console.error('Error fetching scheduled quizzes:', error);
+        console.error('[useNextScheduledQuiz queryFn] Error fetching scheduled quizzes:', error);
+        // Важно пробросить ошибку, чтобы React Query ее обработал
         throw error;
       }
     },
