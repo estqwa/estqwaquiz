@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -96,10 +97,12 @@ func (h *QuizHandler) GetActiveQuiz(c *gin.Context) {
 func (h *QuizHandler) GetScheduledQuizzes(c *gin.Context) {
 	quizzes, err := h.quizService.GetScheduledQuizzes()
 	if err != nil {
+		log.Printf("[QuizHandler] Ошибка при получении запланированных викторин: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
+	log.Printf("[QuizHandler] Запланированные викторины перед отправкой JSON (количество: %d): %+v", len(quizzes), quizzes)
 	c.JSON(http.StatusOK, quizzes)
 }
 
