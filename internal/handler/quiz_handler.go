@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 	"strconv"
@@ -102,8 +103,21 @@ func (h *QuizHandler) GetScheduledQuizzes(c *gin.Context) {
 		return
 	}
 
-	log.Printf("[QuizHandler] Запланированные викторины перед отправкой JSON (количество: %d): %+v", len(quizzes), quizzes)
-	c.JSON(http.StatusOK, quizzes)
+	log.Printf("[QuizHandler] Запланированные викторины перед маршалингом (количество: %d): %+v", len(quizzes), quizzes)
+
+	// Явный маршалинг в JSON
+	jsonData, err := json.Marshal(quizzes)
+	if err != nil {
+		log.Printf("[QuizHandler] Ошибка при маршалинге JSON: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error during JSON marshaling"})
+		return
+	}
+
+	// Логирование результата маршалинга
+	log.Printf("[QuizHandler] Сериализованные JSON данные: %s", string(jsonData))
+
+	// Отправка сырых JSON байт
+	c.Data(http.StatusOK, "application/json; charset=utf-8", jsonData)
 }
 
 // AddQuestionsRequest представляет запрос на добавление вопросов
