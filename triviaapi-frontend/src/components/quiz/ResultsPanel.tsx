@@ -1,6 +1,6 @@
 import React, { memo, useMemo } from 'react';
 import { UserQuizResult } from '../../types/result';
-import { formatDateTime } from '../../utils/date-utils';
+import { formatDateTime } from '../../utils/dateFormat';
 import Link from 'next/link';
 import Button from '../common/Button';
 
