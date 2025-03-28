@@ -79,6 +79,7 @@ export const authService = {
 
     // Для Bearer Auth нужно передать refresh_token в теле запроса
     if (!useCookieAuth) {
+      // TODO: SECURITY - Move token storage from localStorage to HttpOnly cookies managed by the backend to mitigate XSS risks.
       // В реальном приложении refresh_token был бы в localStorage или другом безопасном хранилище
       const refreshToken = localStorage.getItem('refresh_token');
       if (!refreshToken) {
@@ -136,6 +137,7 @@ export const authService = {
       
       // Для Bearer Auth удаляем токены из localStorage
       if (!useCookieAuth) {
+        // TODO: SECURITY - Move token storage from localStorage to HttpOnly cookies managed by the backend to mitigate XSS risks.
         localStorage.removeItem('access_token');
         localStorage.removeItem('refresh_token');
       }

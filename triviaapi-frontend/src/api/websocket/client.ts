@@ -9,6 +9,7 @@ import {
 import { tokenRefreshed, logoutSuccess } from '../../store/auth/slice';
 import { authService } from '../services/authService';
 import { WebSocketMessage as ReduxWebSocketMessage, WebSocketMessage, MessagePriority } from '../../types/websocket';
+import { transformKeysToSnakeCase, transformKeysToCamelCase } from '../../utils/api';
 
 // Эта функция больше не нужна, так как мы будем получать тикет отдельным запросом
 // const getWebSocketToken = (): string | null => {
@@ -165,7 +166,14 @@ export class WebSocketClient {
 
         this.socket.onmessage = (event) => {
           try {
-            const message = JSON.parse(event.data as string) as WebSocketMessage;
+            const rawMessage = JSON.parse(event.data as string) as WebSocketMessage;
+            
+            // Преобразуем данные сообщения из snake_case в camelCase
+            const message: WebSocketMessage = {
+              type: rawMessage.type,
+              data: transformKeysToCamelCase(rawMessage.data),
+              priority: rawMessage.priority
+            };
 
             // Обработка heartbeat от сервера
             if (message.type === 'server:heartbeat') {
@@ -262,6 +270,10 @@ export class WebSocketClient {
       console.log(`Reconnect attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts}`);
       // Пытаемся переподключиться
       this.connect()
+        .then(() => {
+          console.log(`Successfully reconnected WebSocket after attempt ${this.reconnectAttempts}`);
+          // TODO: Sync state on reconnect - Request current quiz state from backend here (via WS message or API call) to ensure consistency after connection loss.
+        })
         .catch(error => {
           console.error(`Reconnect attempt ${this.reconnectAttempts} failed:`, error);
           // Явно не вызываем handleReconnection отсюда, т.к. это сделает onclose
@@ -277,7 +289,9 @@ export class WebSocketClient {
     }
     
     try {
-      const message: WebSocketMessage = { type, data, priority };
+      // Преобразуем данные из camelCase в snake_case перед отправкой
+      const transformedData = transformKeysToSnakeCase(data);
+      const message: WebSocketMessage = { type, data: transformedData, priority };
       this.socket.send(JSON.stringify(message));
       return true;
     } catch (error) {

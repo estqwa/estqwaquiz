@@ -2,6 +2,7 @@ import axios, { AxiosInstance, AxiosRequestConfig, InternalAxiosRequestConfig } 
 import { store } from '../../store';
 import { tokenRefreshed, logoutSuccess } from '../../store/auth/slice';
 import { authService } from '../services/authService';
+import { transformKeysToSnakeCase, transformKeysToCamelCase } from '../../utils/api';
 
 let isRefreshing = false;
 let failedQueue: Array<{ resolve: (value: unknown) => void; reject: (reason?: any) => void }> = [];
@@ -33,7 +34,7 @@ export const createApiClient = (config?: AxiosRequestConfig): AxiosInstance => {
     ...config,
   });
 
-  // Интерцептор запроса для добавления авторизационного токена
+  // Интерцептор запроса для добавления авторизационного токена и преобразования данных в snake_case
   client.interceptors.request.use(
     (config: InternalAxiosRequestConfig) => {
       const { token, csrfToken } = store.getState().auth;
@@ -48,14 +49,25 @@ export const createApiClient = (config?: AxiosRequestConfig): AxiosInstance => {
         config.headers['X-CSRF-Token'] = csrfToken;
       }
 
+      // Преобразуем данные из camelCase в snake_case перед отправкой на сервер
+      if (config.data) {
+        config.data = transformKeysToSnakeCase(config.data);
+      }
+
       return config;
     },
     (error) => Promise.reject(error)
   );
 
-  // Интерцептор ответа для обработки ошибок
+  // Интерцептор ответа для обработки ошибок и преобразования данных в camelCase
   client.interceptors.response.use(
-    (response) => response,
+    (response) => {
+      // Преобразуем данные из snake_case в camelCase при получении от сервера
+      if (response.data) {
+        response.data = transformKeysToCamelCase(response.data);
+      }
+      return response;
+    },
     async (error) => {
       const originalRequest = error.config;
       

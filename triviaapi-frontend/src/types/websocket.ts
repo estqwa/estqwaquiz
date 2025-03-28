@@ -9,15 +9,15 @@ export interface WebSocketMessage {
 
 /**
  * Типы WebSocket событий
+ * Названия констант должны точно соответствовать именам на бэкенде
  */
 export enum WebSocketEventType {
   // События аутентификации
-  TOKEN_REFRESHED = 'token_refreshed',
-  TOKEN_EXPIRED = 'token_expired',
-  TOKEN_REVOKED = 'token_revoked',
-  TOKEN_INVALIDATED = 'token_invalidated',
-  TOKEN_ABOUT_TO_EXPIRE = 'token_about_to_expire',
-  KEY_ROTATION = 'key_rotation',
+  TOKEN_EXPIRE_SOON = 'TOKEN_EXPIRE_SOON',
+  TOKEN_EXPIRED = 'TOKEN_EXPIRED',
+  TOKEN_REVOKED = 'TOKEN_REVOKED',
+  TOKEN_INVALIDATED = 'TOKEN_INVALIDATED',
+  TOKEN_REFRESHED = 'TOKEN_REFRESHED',
   
   // События викторины
   QUIZ_START = 'QUIZ_START',
@@ -26,23 +26,21 @@ export enum WebSocketEventType {
   QUESTION_END = 'QUESTION_END',
   USER_ANSWER = 'USER_ANSWER',
   RESULT_UPDATE = 'RESULT_UPDATE',
-  QUIZ_TIMER = 'quiz:timer',
-  QUIZ_CANCELLED = 'quiz:cancelled',
   
   // Системные события
   USER_HEARTBEAT = 'user:heartbeat',
   SERVER_HEARTBEAT = 'server:heartbeat',
-  USER_DISCONNECT = 'USER_DISCONNECT',
-  SHARD_MIGRATION = 'SHARD_MIGRATION',
   
-  // События анонса и ожидания
-  QUIZ_ANNOUNCEMENT = 'quiz:announcement',
-  QUIZ_WAITING_ROOM = 'quiz:waiting_room',
-  QUIZ_COUNTDOWN = 'quiz:countdown',
-  QUIZ_ANSWER_REVEAL = 'quiz:answer_reveal',
-  QUIZ_ANSWER_RESULT = 'quiz:answer_result',
-  QUIZ_LEADERBOARD = 'quiz:leaderboard',
-  QUIZ_USER_READY = 'quiz:user_ready'
+  // Дополнительные события (проверить соответствие на бэкенде)
+  QUIZ_TIMER = 'QUIZ_TIMER',
+  QUIZ_CANCELLED = 'QUIZ_CANCELLED',
+  QUIZ_ANNOUNCEMENT = 'QUIZ_ANNOUNCEMENT',
+  QUIZ_WAITING_ROOM = 'QUIZ_WAITING_ROOM',
+  QUIZ_COUNTDOWN = 'QUIZ_COUNTDOWN',
+  QUIZ_ANSWER_REVEAL = 'QUIZ_ANSWER_REVEAL',
+  QUIZ_ANSWER_RESULT = 'QUIZ_ANSWER_RESULT',
+  QUIZ_LEADERBOARD = 'QUIZ_LEADERBOARD',
+  QUIZ_USER_READY = 'QUIZ_USER_READY'
 }
 
 /**

@@ -80,4 +80,64 @@ export const formatApiError = (error: any): string => {
   }
   
   return 'Произошла непредвиденная ошибка';
+};
+
+/**
+ * Преобразует строку из camelCase в snake_case
+ * @param str строка в camelCase
+ * @returns строка в snake_case
+ */
+export const camelToSnakeCase = (str: string): string => {
+  return str.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
+};
+
+/**
+ * Преобразует строку из snake_case в camelCase
+ * @param str строка в snake_case
+ * @returns строка в camelCase
+ */
+export const snakeToCamelCase = (str: string): string => {
+  return str.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
+};
+
+/**
+ * Рекурсивно преобразует ключи объекта из camelCase в snake_case
+ * @param obj исходный объект
+ * @returns объект с ключами в snake_case
+ */
+export const transformKeysToSnakeCase = <T extends unknown>(obj: T): T => {
+  if (obj === null || obj === undefined || typeof obj !== 'object') {
+    return obj;
+  }
+
+  if (Array.isArray(obj)) {
+    return obj.map(transformKeysToSnakeCase) as unknown as T;
+  }
+
+  return Object.entries(obj).reduce((acc, [key, value]) => {
+    const snakeKey = camelToSnakeCase(key);
+    acc[snakeKey] = transformKeysToSnakeCase(value);
+    return acc;
+  }, {} as Record<string, any>) as T;
+};
+
+/**
+ * Рекурсивно преобразует ключи объекта из snake_case в camelCase
+ * @param obj исходный объект
+ * @returns объект с ключами в camelCase
+ */
+export const transformKeysToCamelCase = <T extends unknown>(obj: T): T => {
+  if (obj === null || obj === undefined || typeof obj !== 'object') {
+    return obj;
+  }
+
+  if (Array.isArray(obj)) {
+    return obj.map(transformKeysToCamelCase) as unknown as T;
+  }
+
+  return Object.entries(obj).reduce((acc, [key, value]) => {
+    const camelKey = snakeToCamelCase(key);
+    acc[camelKey] = transformKeysToCamelCase(value);
+    return acc;
+  }, {} as Record<string, any>) as T;
 }; 
