@@ -104,10 +104,24 @@ const PlayPage: NextPage = () => {
   
   // Если нет активной викторины, но есть запланированная, показываем информацию о ней
   if (nextScheduledQuiz) {
-    const startTime = new Date(nextScheduledQuiz.start_time || nextScheduledQuiz.scheduled_time || '');
-    const timeUntilStart = startTime.getTime() - Date.now();
-    const hoursUntilStart = Math.floor(timeUntilStart / (1000 * 60 * 60));
-    const minutesUntilStart = Math.floor((timeUntilStart % (1000 * 60 * 60)) / (1000 * 60));
+    // Проверяем наличие scheduled_time или start_time и создаем объект Date
+    const scheduledTimeStr = nextScheduledQuiz.scheduled_time || nextScheduledQuiz.start_time;
+    const startTime = scheduledTimeStr ? new Date(scheduledTimeStr) : null;
+    
+    // Расчет оставшегося времени только если startTime валидный
+    let hoursUntilStart = 0;
+    let minutesUntilStart = 0;
+    
+    if (startTime && !isNaN(startTime.getTime())) {
+      const timeUntilStart = Math.max(0, startTime.getTime() - Date.now());
+      hoursUntilStart = Math.floor(timeUntilStart / (1000 * 60 * 60));
+      minutesUntilStart = Math.floor((timeUntilStart % (1000 * 60 * 60)) / (1000 * 60));
+    }
+
+    // Форматирование даты с защитой от Invalid Date
+    const formattedStartTime = startTime && !isNaN(startTime.getTime())
+      ? startTime.toLocaleString('ru-RU')
+      : 'Время не указано';
 
     return (
       <Layout title="Ожидание викторины">
@@ -118,7 +132,7 @@ const PlayPage: NextPage = () => {
             <p className="text-gray-600 mt-2">{nextScheduledQuiz.description}</p>
             <div className="mt-4 p-4 bg-blue-50 rounded-md">
               <p className="font-medium">Начало через: {hoursUntilStart}ч {minutesUntilStart}мин</p>
-              <p>Дата и время начала: {startTime.toLocaleString()}</p>
+              <p>Дата и время начала: {formattedStartTime}</p>
               <p className="mt-2">Количество вопросов: {nextScheduledQuiz.question_count || 'Не указано'}</p>
               
               {nextScheduledQuiz.duration_minutes && (
