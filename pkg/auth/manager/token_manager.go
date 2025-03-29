@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/yourusername/trivia-api/internal/domain/entity"
 	"github.com/yourusername/trivia-api/internal/domain/repository"
 	"github.com/yourusername/trivia-api/pkg/auth"
@@ -114,6 +115,7 @@ type TokenManager struct {
 	refreshTokenExpiry      time.Duration
 	maxRefreshTokensPerUser int       // Добавлено: настраиваемый лимит сессий
 	lastKeyRotation         time.Time // Добавлено: время последней ротации ключей
+	isProductionMode        bool      // Определяет, устанавливать ли Secure флаг для cookies (true в production, false в development)
 }
 
 // NewTokenManager создает новый менеджер токенов
@@ -123,6 +125,10 @@ func NewTokenManager(
 	refreshTokenRepo repository.RefreshTokenRepository,
 	userRepo repository.UserRepository,
 ) *TokenManager {
+	// Определяем режим работы по Gin. В production режиме gin.Mode() == gin.ReleaseMode
+	isProductionMode := gin.Mode() == gin.ReleaseMode
+	log.Printf("[TokenManager] Инициализация в режиме: %s (production mode: %v)", gin.Mode(), isProductionMode)
+
 	return &TokenManager{
 		jwtService:              jwtService,
 		tokenService:            tokenService,
@@ -134,6 +140,7 @@ func NewTokenManager(
 		refreshTokenExpiry:      RefreshTokenLifetime,
 		maxRefreshTokensPerUser: DefaultMaxRefreshTokensPerUser,
 		lastKeyRotation:         time.Now(),
+		isProductionMode:        isProductionMode,
 	}
 }
 
@@ -351,7 +358,7 @@ func (m *TokenManager) SetRefreshTokenCookie(w http.ResponseWriter, refreshToken
 		Value:    refreshToken,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   m.isProductionMode,
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   int(m.refreshTokenExpiry.Seconds()),
 	})
@@ -364,7 +371,7 @@ func (m *TokenManager) SetAccessTokenCookie(w http.ResponseWriter, accessToken s
 		Value:    accessToken,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   m.isProductionMode,
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   int(m.accessTokenExpiry.Seconds()),
 	})
@@ -401,7 +408,7 @@ func (m *TokenManager) ClearRefreshTokenCookie(w http.ResponseWriter) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   m.isProductionMode,
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   -1,
 	})
@@ -414,7 +421,7 @@ func (m *TokenManager) ClearAccessTokenCookie(w http.ResponseWriter) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   m.isProductionMode,
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   -1,
 	})
