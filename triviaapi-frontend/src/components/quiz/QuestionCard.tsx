@@ -31,12 +31,20 @@ const QuestionCard: React.FC<QuestionCardProps> = ({
   
   // Установка начального времени при изменении вопроса или времени
   useEffect(() => {
+    console.log('QuestionCard получил remainingTime:', remainingTime);
     if (remainingTime !== undefined && remainingTime !== null) {
       setTimeLeft(remainingTime);
-    } else if (question.time_limit_sec) {
-      setTimeLeft(question.time_limit_sec);
+      console.log('QuestionCard установил timeLeft:', remainingTime);
+    } else if (question.timeLimitSeconds) {
+      setTimeLeft(question.timeLimitSeconds);
+      console.log('QuestionCard установил timeLeft из timeLimitSeconds:', question.timeLimitSeconds);
     }
   }, [question, remainingTime]);
+  
+  // Отображаем таймер даже если он не связан с вопросом (например, обратный отсчет до начала)
+  useEffect(() => {
+    console.log('QuestionCard компонент отрисован с timeLeft:', timeLeft);
+  }, [timeLeft]);
   
   // Мемоизированный обработчик выбора ответа
   const handleOptionSelect = useCallback((optionId: string) => {
@@ -98,7 +106,7 @@ const QuestionCard: React.FC<QuestionCardProps> = ({
     <div className="bg-white rounded-lg shadow-sm overflow-hidden">
       <div className="px-6 py-5 border-b border-gray-200 flex justify-between items-center">
         <h2 className="text-xl font-semibold text-gray-900">
-          Вопрос {question.question_number || '#'}
+          Вопрос {question.questionNumber || '#'}
         </h2>
         
         {timeLeft !== null && (
@@ -111,21 +119,21 @@ const QuestionCard: React.FC<QuestionCardProps> = ({
       <div className="px-6 py-6">
         <div className="mb-6">
           <p className="text-lg text-gray-900 font-medium">
-            {question.content}
+            {question.text}
           </p>
         </div>
         
         <div className="space-y-3 mb-8">
-          {question.answers.map(answer => (
+          {question.options.map((option) => (
             <div
-              key={answer.id}
-              onClick={() => handleOptionSelect(answer.id.toString())}
-              className={`p-4 border rounded-lg cursor-pointer transition-colors ${getOptionClass(answer.id.toString())} ${
+              key={option.id}
+              onClick={() => handleOptionSelect(option.id.toString())}
+              className={`p-4 border rounded-lg cursor-pointer transition-colors ${getOptionClass(option.id.toString())} ${
                 disabled ? 'opacity-70 cursor-not-allowed' : ''
               }`}
             >
-              <p className="text-gray-900">{answer.content}</p>
-              {hasSubmitted && correctOptionId !== null && answer.id === correctOptionId && (
+              <p className="text-gray-900">{option.text}</p>
+              {hasSubmitted && correctOptionId !== null && option.id === correctOptionId && (
                 <div className="mt-2 text-sm text-green-600 flex items-center">
                   <svg className="h-5 w-5 mr-1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
                     <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />

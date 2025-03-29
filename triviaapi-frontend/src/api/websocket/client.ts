@@ -181,6 +181,11 @@ export class WebSocketClient {
               return;
             }
 
+            // Показываем список зарегистрированных типов при получении сообщения для отладки
+            console.log('Получено сообщение типа:', message.type);
+            console.log('Зарегистрированные типы:', Array.from(this.messageHandlers.keys()));
+            console.log('Есть обработчик для этого типа:', this.messageHandlers.has(message.type));
+
             // Диспатч сообщения в Redux store (для логгирования или общей обработки)
             // Преобразуем внутреннее сообщение в формат ReduxWebSocketMessage
             store.dispatch(wsMessage({
@@ -341,7 +346,10 @@ export class WebSocketClient {
     
     const handlers = this.messageHandlers.get(type)!;
     handlers.push(handler as (data: unknown) => void);
-    // console.log(`Added WebSocket message handler for type: ${type}`); // Логирование для отладки
+    console.log(`Зарегистрирован WebSocket обработчик для типа: "${type}", всего: ${handlers.length}`); // Расширенное логирование
+    
+    // Выводим все текущие типы сообщений с обработчиками для отладки
+    console.log('Текущие типы сообщений с обработчиками:', Array.from(this.messageHandlers.keys()));
     
     // Возвращаем функцию для удаления этого обработчика
     return () => {

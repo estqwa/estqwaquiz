@@ -5,13 +5,11 @@ import { AuthState } from './types';
 // Начальное состояние
 const initialState: AuthState = {
   user: null,
-  token: null, // Access Token (для Bearer)
   csrfToken: null, // CSRF Token (для Cookie Auth)
   isAuthenticated: false,
   isLoading: false,
   error: null,
-  useCookieAuth: true, // По умолчанию используем Cookie Auth как более безопасный
-  refreshToken: null,
+  status: 'idle',
   expiresAt: null,
   activeSessions: []
 };
@@ -24,83 +22,93 @@ const authSlice = createSlice({
     authRequestStart: (state) => {
       state.isLoading = true;
       state.error = null;
+      state.status = 'loading';
     },
+    
     // Экшен при успешном логине/регистрации/получении пользователя
-    authSuccess: (state, action: PayloadAction<{ user: User; token?: string; csrfToken?: string }>) => {
+    loginSuccess: (state, action: PayloadAction<{ user: User | null; csrfToken: string | null }>) => {
       // Проверяем наличие пользователя
       if (!action.payload.user) {
-        console.error('authSuccess called without user data:', action.payload);
+        console.error('loginSuccess called without user data:', action.payload);
         return;
       }
       
       state.isLoading = false;
       state.isAuthenticated = true;
       state.user = action.payload.user;
-      state.token = action.payload.token || null;
       state.csrfToken = action.payload.csrfToken || null;
       state.error = null;
+      state.status = 'succeeded';
     },
+    
     // Экшен при ошибке логина/регистрации
     authFailure: (state, action: PayloadAction<string>) => {
       state.isLoading = false;
       state.isAuthenticated = false;
       state.user = null;
-      state.token = null;
       state.csrfToken = null;
       state.error = action.payload;
+      state.status = 'failed';
     },
+    
     // Экшен при успешном выходе
     logoutSuccess: (state) => {
       state.user = null;
-      state.token = null;
       state.csrfToken = null;
       state.isAuthenticated = false;
       state.isLoading = false;
       state.error = null;
+      state.status = 'idle';
     },
-    // Экшен при успешном обновлении токенов
-    tokenRefreshed: (state, action: PayloadAction<{ token?: string | null; csrfToken?: string | null }>) => {
-      if (action.payload.token !== undefined) {
-        state.token = action.payload.token;
-      }
-      if (action.payload.csrfToken !== undefined) {
-        state.csrfToken = action.payload.csrfToken;
-      }
+    
+    // Экшен для установки пользователя при проверке сессии
+    setUser: (state, action: PayloadAction<User | null>) => {
+      state.user = action.payload;
+      state.isAuthenticated = !!action.payload;
       state.isLoading = false;
-      state.isAuthenticated = true;
+      state.status = 'succeeded';
     },
+    
     // Экшен для обновления данных пользователя
     updateUser: (state, action: PayloadAction<Partial<User>>) => {
       if (state.user) {
         state.user = { ...state.user, ...action.payload };
       }
     },
-    // Экшен для переключения режима аутентификации
-    setAuthMode: (state, action: PayloadAction<'cookie' | 'bearer'>) => {
-      state.useCookieAuth = action.payload === 'cookie';
-      // При смене режима сбрасываем токены другого режима
-      if (state.useCookieAuth) {
-        state.token = null;
-      } else {
-        state.csrfToken = null;
-      }
-    },
+    
     // Очистка ошибки аутентификации
     clearAuthError: (state) => {
       state.error = null;
+    },
+    
+    // Экшен для установки статуса проверки аутентификации
+    setAuthStatus: (state, action: PayloadAction<'idle' | 'loading' | 'succeeded' | 'failed' | 'checked'>) => {
+      state.status = action.payload;
+    },
+    
+    // Экшен для установки флага завершения проверки аутентификации
+    setAuthChecked: (state) => {
+      state.status = 'checked';
+    },
+    
+    // Экшен для обновления CSRF-токена (если используется)
+    updateCsrfToken: (state, action: PayloadAction<string | null>) => {
+      state.csrfToken = action.payload;
     }
   },
 });
 
 export const {
   authRequestStart,
-  authSuccess,
+  loginSuccess,
   authFailure,
   logoutSuccess,
-  tokenRefreshed,
+  setUser,
   updateUser,
-  setAuthMode,
   clearAuthError,
+  setAuthStatus,
+  setAuthChecked,
+  updateCsrfToken
 } = authSlice.actions;
 
 export default authSlice.reducer; 

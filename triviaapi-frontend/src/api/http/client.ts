@@ -1,22 +1,7 @@
 import axios, { AxiosInstance, AxiosRequestConfig, InternalAxiosRequestConfig } from 'axios';
 import { store } from '../../store';
-import { tokenRefreshed, logoutSuccess } from '../../store/auth/slice';
-import { authService } from '../services/authService';
+import { logoutSuccess } from '../../store/auth/slice';
 import { transformKeysToSnakeCase, transformKeysToCamelCase } from '../../utils/api';
-
-let isRefreshing = false;
-let failedQueue: Array<{ resolve: (value: unknown) => void; reject: (reason?: any) => void }> = [];
-
-const processQueue = (error: any, token: string | null = null) => {
-  failedQueue.forEach(prom => {
-    if (error) {
-      prom.reject(error);
-    } else {
-      prom.resolve(token);
-    }
-  });
-  failedQueue = [];
-};
 
 // URL для API
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
@@ -30,22 +15,17 @@ export const createApiClient = (config?: AxiosRequestConfig): AxiosInstance => {
       'Content-Type': 'application/json',
       ...config?.headers,
     },
-    withCredentials: true,
+    withCredentials: true, // Важно для передачи HttpOnly cookies между доменами
     ...config,
   });
 
-  // Интерцептор запроса для добавления авторизационного токена и преобразования данных в snake_case
+  // Интерцептор запроса для добавления CSRF токена и преобразования данных в snake_case
   client.interceptors.request.use(
     (config: InternalAxiosRequestConfig) => {
-      const { token, csrfToken } = store.getState().auth;
-
-      // Добавляем токен авторизации, если он есть
-      if (token) {
-        config.headers.Authorization = `Bearer ${token}`;
-      }
+      const { csrfToken } = store.getState().auth;
       
-      // Добавляем CSRF-токен, если он есть
-      if (csrfToken) {
+      // Добавляем CSRF-токен для небезопасных методов, если он есть
+      if (csrfToken && config.method && !['get', 'head', 'options'].includes(config.method.toLowerCase())) {
         config.headers['X-CSRF-Token'] = csrfToken;
       }
 
@@ -71,74 +51,14 @@ export const createApiClient = (config?: AxiosRequestConfig): AxiosInstance => {
       return response;
     },
     async (error) => {
-      const originalRequest = error.config;
-      
-      // Проверяем, что ошибка - это 401 (Unauthorized) и запрос не является 
-      // запросом на обновление токена (чтобы избежать бесконечного цикла)
-      if (error.response && 
-          error.response.status === 401 && 
-          !originalRequest._retry && 
-          !originalRequest.url?.includes('/auth/refresh')) {
+      // Если получили 401 Unauthorized, значит сессия истекла или пользователь не авторизован
+      if (error.response && error.response.status === 401) {
+        // Выход пользователя из системы
+        store.dispatch(logoutSuccess());
         
-        // Если уже идет процесс обновления токена, добавляем запрос в очередь
-        if (isRefreshing) {
-          return new Promise((resolve, reject) => {
-            failedQueue.push({ resolve, reject });
-          })
-            .then(token => {
-              // Обновляем заголовок Authorization для оригинального запроса
-              if (token) {
-                originalRequest.headers.Authorization = `Bearer ${token}`;
-              }
-              return client(originalRequest);
-            })
-            .catch(err => {
-              return Promise.reject(err);
-            });
-        }
-
-        // Устанавливаем флаг для предотвращения повторных попыток обновления
-        originalRequest._retry = true;
-        isRefreshing = true;
-
-        try {
-          // Пытаемся обновить токен
-          const { accessToken, csrfToken } = await authService.refreshToken();
-          
-          // Сохраняем новые токены в Redux store
-          store.dispatch(tokenRefreshed({ token: accessToken, csrfToken }));
-          
-          // Обрабатываем очередь неудавшихся запросов
-          processQueue(null, accessToken);
-          
-          // Обновляем заголовки для оригинального запроса
-          if (accessToken) {
-            originalRequest.headers.Authorization = `Bearer ${accessToken}`;
-          }
-          
-          if (csrfToken) {
-            originalRequest.headers['X-CSRF-Token'] = csrfToken;
-          }
-          
-          // Сбрасываем флаг обновления токена
-          isRefreshing = false;
-          
-          // Повторяем оригинальный запрос с новыми токенами
-          return client(originalRequest);
-        } catch (refreshError) {
-          // В случае ошибки обновления токена
-          // Выход пользователя из системы
-          store.dispatch(logoutSuccess());
-          
-          // Обрабатываем очередь с ошибкой
-          processQueue(refreshError, null);
-          
-          // Сбрасываем флаг обновления токена
-          isRefreshing = false;
-          
-          // Пробрасываем ошибку обновления токена дальше
-          return Promise.reject(refreshError);
-        }
+        // Перенаправляем на страницу логина (если необходимо)
+        // Можно добавить редирект на /login через router.push('/login') 
+        // или через window.location.href = '/login'
       }
 
       // Для всех остальных ошибок просто пробрасываем их дальше

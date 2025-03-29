@@ -29,6 +29,7 @@ const quizSlice = createSlice({
   reducers: {
     // Установка активной викторины
     setActiveQuiz: (state, action: PayloadAction<{ quiz: Quiz; questions?: Question[] }>) => {
+      console.log('setActiveQuiz вызван с данными:', action.payload);
       state.activeQuiz = action.payload.quiz;
       state.questions = action.payload.questions || [];
       state.quizStatus = 'waiting';
@@ -38,9 +39,14 @@ const quizSlice = createSlice({
       state.leaderboard = null;
       state.error = null;
       state.isLoading = false;
+      console.log('Новое состояние после setActiveQuiz:', { 
+        activeQuiz: state.activeQuiz, 
+        quizStatus: state.quizStatus 
+      });
     },
     // Установка текущего вопроса
     setCurrentQuestion: (state, action: PayloadAction<Question>) => {
+      console.log('setCurrentQuestion вызван с данными:', action.payload);
       // Добавляем вопрос в список, если его там еще нет
       if (!state.questions.some(q => q.id === action.payload.id)) {
         state.questions.push(action.payload);
@@ -49,6 +55,11 @@ const quizSlice = createSlice({
       state.quizStatus = 'active';
       state.remainingTime = action.payload.timeLimitSeconds;
       state.error = null;
+      console.log('Новое состояние после setCurrentQuestion:', { 
+        currentQuestion: state.currentQuestion, 
+        quizStatus: state.quizStatus,
+        remainingTime: state.remainingTime
+      });
     },
     // Добавление/обновление ответа пользователя
     updateUserAnswer: (state, action: PayloadAction<UserAnswer>) => {
@@ -56,8 +67,16 @@ const quizSlice = createSlice({
     },
     // Обновление таймера вопроса
     updateRemainingTime: (state, action: PayloadAction<number>) => {
-      if (state.quizStatus === 'active') {
+      console.log('updateRemainingTime вызван с данными:', action.payload);
+      console.log('Текущий статус викторины:', state.quizStatus);
+      
+      // Обновляем таймер как для активной викторины, так и для режима ожидания
+      // Это позволит отображать обратный отсчет перед началом викторины
+      if (state.quizStatus === 'active' || state.quizStatus === 'waiting') {
         state.remainingTime = Math.max(0, action.payload);
+        console.log('Обновлено remainingTime:', state.remainingTime);
+      } else {
+        console.log('Не обновляем таймер, так как статус не active и не waiting');
       }
     },
     // Завершение вопроса

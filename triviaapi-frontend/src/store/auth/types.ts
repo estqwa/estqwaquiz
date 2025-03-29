@@ -6,13 +6,11 @@ import { User } from '../../types/user';
  */
 export interface AuthState {
   user: User | null; // Данные пользователя
-  token: string | null; // Access Token (используется при Bearer Auth)
-  refreshToken: string | null; // Refresh Token (для обновления access token)
   csrfToken: string | null; // CSRF Token (используется при Cookie Auth)
   isAuthenticated: boolean; // Флаг аутентификации пользователя
   isLoading: boolean; // Флаг загрузки
   error: string | null; // Сообщение об ошибке
-  useCookieAuth: boolean; // Флаг для выбора режима аутентификации (Cookie или Bearer)
+  status: 'idle' | 'loading' | 'succeeded' | 'failed' | 'checked'; // Статус проверки аутентификации
   expiresAt: number | null; // Время истечения токена в миллисекундах от эпохи
   activeSessions: Array<{
     device_info: string;

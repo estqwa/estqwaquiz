@@ -114,11 +114,12 @@ class WebSocketManager {
         this.socket.onmessage = (event) => {
           try {
             const message = JSON.parse(event.data) as WebSocketMessage;
-            console.log('Received WebSocket message:', message);
+            console.log('Received WebSocket message:', message.type, message);
             
             // Проверяем наличие обработчиков для типа сообщения
             const handlers = this.messageHandlers[message.type];
             if (handlers) {
+              console.log(`Вызываем ${handlers.size} обработчиков для типа ${message.type}`);
               handlers.forEach(handler => {
                 try {
                   handler(message.data);
@@ -126,6 +127,8 @@ class WebSocketManager {
                   console.error(`Error in WebSocket handler for ${message.type}:`, handlerError);
                 }
               });
+            } else {
+              console.warn(`Нет обработчиков для типа сообщения: ${message.type}`);
             }
           } catch (error) {
             console.error('Error parsing WebSocket message:', error);
@@ -308,7 +311,11 @@ export const useQuizWebSocket = (quizId?: number) => {
     // Обработчик обратного отсчета
     handlers.push(wsClient.addMessageHandler<QuizCountdownEvent>(WebSocketEventType.QUIZ_COUNTDOWN, (data) => {
       // Если прислали данные для другой викторины, игнорируем
-      if (data.quizId !== quizId) return;
+      console.log('Получили QUIZ_COUNTDOWN, данные:', data);
+      if (data.quizId !== quizId) {
+        console.log(`Игнорируем QUIZ_COUNTDOWN для другой викторины ${data.quizId}, наша: ${quizId}`);
+        return;
+      }
       
       console.log('Обратный отсчет до начала викторины:', data.secondsLeft);
       // Обновляем время в Redux для отображения обратного отсчета
@@ -318,7 +325,11 @@ export const useQuizWebSocket = (quizId?: number) => {
     // Обработчик нового вопроса
     handlers.push(wsClient.addMessageHandler<QuestionStartEvent>(WebSocketEventType.QUESTION_START, (data: QuestionStartEvent) => {
       // Если прислали вопрос для другой викторины, игнорируем
-      if (data.quizId !== quizId) return;
+      console.log('Получили QUESTION_START, данные:', data);
+      if (data.quizId !== quizId) {
+        console.log(`Игнорируем QUESTION_START для другой викторины ${data.quizId}, наша: ${quizId}`);
+        return;
+      }
       
       dispatch(setCurrentQuestion({
         id: data.questionId,
@@ -342,7 +353,11 @@ export const useQuizWebSocket = (quizId?: number) => {
     // Обработчик таймера вопроса
     handlers.push(wsClient.addMessageHandler<QuizTimerEvent>(WebSocketEventType.QUIZ_TIMER, (data: QuizTimerEvent) => {
       // Если прислали таймер для другой викторины, игнорируем
-      if (data.quizId !== quizId) return;
+      console.log('Получили QUIZ_TIMER, данные:', data);
+      if (data.quizId !== quizId) {
+        console.log(`Игнорируем QUIZ_TIMER для другой викторины ${data.quizId}, наша: ${quizId}`);
+        return;
+      }
       
       dispatch(updateRemainingTime(data.remainingSeconds));
     }));

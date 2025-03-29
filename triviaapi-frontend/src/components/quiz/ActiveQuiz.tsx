@@ -37,6 +37,16 @@ const ActiveQuiz: React.FC<ActiveQuizProps> = ({ quizId }) => {
   const [hasSubmittedCurrentAnswer, setHasSubmittedCurrentAnswer] = useState(false);
   const [correctOptionId, setCorrectOptionId] = useState<number | null>(null);
   
+  // Дополнительный эффект для логирования изменений состояния викторины
+  useEffect(() => {
+    console.log('ActiveQuiz: изменение состояния викторины', {
+      quizStatus,
+      activeQuiz: activeQuiz?.id, 
+      currentQuestion: currentQuestion?.id,
+      remainingTime
+    });
+  }, [quizStatus, activeQuiz, currentQuestion, remainingTime]);
+  
   // Сбрасываем состояние при изменении вопроса
   useEffect(() => {
     if (currentQuestion) {
@@ -156,12 +166,31 @@ const ActiveQuiz: React.FC<ActiveQuizProps> = ({ quizId }) => {
                   ? 'Ожидание начала викторины...' 
                   : 'Подготовка следующего вопроса...'}
               </p>
-              <div className="flex justify-center">
+              
+              {/* Отображаем таймер обратного отсчета, если он есть */}
+              {remainingTime !== null && remainingTime > 0 && (
+                <div className="my-4">
+                  <p className="text-sm text-gray-500 mb-2">Начало через:</p>
+                  <div className="text-2xl font-bold text-blue-600">
+                    {Math.floor(remainingTime / 60)}:{(remainingTime % 60).toString().padStart(2, '0')}
+                  </div>
+                </div>
+              )}
+              
+              <div className="flex justify-center mt-4">
                 <div className="animate-pulse h-8 w-8">
                   <svg className="h-full w-full text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
                 </div>
+              </div>
+              
+              {/* Добавляем отладочную информацию */}
+              <div className="mt-4 p-2 bg-gray-100 rounded text-xs text-left">
+                <p>Статус: {quizStatus}</p>
+                <p>Таймер: {remainingTime !== null ? remainingTime : 'не установлен'}</p>
+                <p>ID викторины: {activeQuiz?.id || 'нет'}</p>
+                <p>Вопрос: {currentQuestion ? 'загружен' : 'не загружен'}</p>
               </div>
             </div>
           </div>
