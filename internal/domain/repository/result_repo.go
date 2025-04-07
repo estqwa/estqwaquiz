@@ -14,4 +14,5 @@ type ResultRepository interface {
 	GetUserResult(userID uint, quizID uint) (*entity.Result, error)
 	GetUserResults(userID uint, limit, offset int) ([]entity.Result, error)
 	CalculateRanks(quizID uint) error
+	GetQuizWinners(quizID uint) ([]entity.Result, error)
 }

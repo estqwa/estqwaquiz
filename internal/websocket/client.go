@@ -2,8 +2,12 @@ package websocket
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"log"
+	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -94,6 +98,10 @@ type Client struct {
 
 	// Роли клиента (например, "admin", "player", "spectator")
 	roles map[string]bool
+
+	// ID викторины, к которой подключен клиент (0 если не подключен)
+	// Используем атомарный тип для потокобезопасности
+	currentQuizID atomic.Uint32
 }
 
 // NewClient создает нового клиента
@@ -132,123 +140,184 @@ func NewClientWithConfig(hub interface{}, conn *websocket.Conn, userID string, c
 	}
 }
 
-// readPump перекачивает сообщения от WebSocket соединения в hub.
-func (c *Client) readPump(messageHandler func(message []byte, client *Client)) {
+// SetQuizID устанавливает ID текущей викторины для клиента
+func (c *Client) SetQuizID(quizID uint) {
+	c.currentQuizID.Store(uint32(quizID))
+	log.Printf("Client %s (Conn: %s) set QuizID to %d", c.UserID, c.ConnectionID, quizID)
+}
+
+// GetQuizID возвращает ID текущей викторины клиента
+func (c *Client) GetQuizID() uint {
+	return uint(c.currentQuizID.Load())
+}
+
+// ClearQuizID сбрасывает ID текущей викторины (например, при выходе)
+func (c *Client) ClearQuizID() {
+	c.currentQuizID.Store(0)
+	log.Printf("Client %s (Conn: %s) cleared QuizID", c.UserID, c.ConnectionID)
+}
+
+// readPump читает сообщения от клиента и передает их обработчику
+func (c *Client) readPump(messageHandler func(message []byte, client *Client) error) {
 	defer func() {
-		log.Printf("WebSocket readPump: client %s disconnected, unregistering from hub", c.UserID)
-
-		// Обработка отключения в зависимости от типа хаба
-		if h, ok := c.hub.(*Hub); ok {
-			h.UnregisterClient(c)
-		} else if sh, ok := c.hub.(*ShardedHub); ok {
-			sh.UnregisterClient(c)
+		log.Printf("WebSocket Client Read Pump STOPPED for UserID: %s, ConnID: %s", c.UserID, c.ConnectionID)
+		// Сообщаем хабу об отписке клиента
+		// Проверяем, к какому типу хаба подключен клиент
+		switch hub := c.hub.(type) {
+		case *Hub:
+			hub.unregister <- c
+		case *Shard:
+			hub.unregister <- c
+		case *ShardedHub: // Добавлено для поддержки прямого подключения к ShardedHub (хотя обычно через Shard)
+			hub.UnregisterClient(c)
+		default:
+			log.Printf("Warning: Unknown hub type for client %s during unregister", c.UserID)
 		}
-
+		// Закрываем соединение
 		c.conn.Close()
 	}()
 
-	c.conn.SetReadLimit(maxMessageSize)
+	// Настройка чтения сообщений
+	c.conn.SetReadLimit(maxMessageSize) // Используем значение из defaultConfig
 	c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.conn.SetPongHandler(func(string) error {
-		log.Printf("WebSocket: received pong from client %s", c.UserID)
 		c.conn.SetReadDeadline(time.Now().Add(pongWait))
-		c.lastActivity = time.Now()
+		c.lastActivity = time.Now() // Обновляем время активности при получении pong
 		return nil
 	})
 
-	log.Printf("WebSocket readPump: started for client %s", c.UserID)
+	log.Printf("WebSocket Client Read Pump STARTED for UserID: %s, ConnID: %s", c.UserID, c.ConnectionID)
 
 	for {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("WebSocket error for client %s: %v", c.UserID, err)
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure, websocket.CloseNormalClosure) {
+				log.Printf("WebSocket Client Read Error (UserID: %s, ConnID: %s): %v", c.UserID, c.ConnectionID, err)
+			} else if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				log.Printf("WebSocket Client Connection Closed Normally (UserID: %s, ConnID: %s): %v", c.UserID, c.ConnectionID, err)
 			} else {
-				log.Printf("WebSocket readPump: expected close error for client %s: %v", c.UserID, err)
+				log.Printf("WebSocket Client Read Error (UserID: %s, ConnID: %s): %v", c.UserID, c.ConnectionID, err)
 			}
-			break
+			break // Выходим из цикла при любой ошибке чтения
 		}
+		// Логируем получение сообщения (можно сделать опциональным)
+		// log.Printf("Received message from %s: %s", c.UserID, string(message))
+
+		// Обновляем время активности при получении сообщения
 		c.lastActivity = time.Now()
 
-		// Обновляем метрики полученных сообщений в зависимости от типа хаба
-		if h, ok := c.hub.(*Hub); ok && h != nil {
-			h.metrics.mu.Lock()
-			h.metrics.messagesReceived++
-			h.metrics.mu.Unlock()
-		}
-
-		message = bytes.TrimSpace(bytes.Replace(message, newline, space, -1))
-		log.Printf("WebSocket message received from client %s: %s", c.UserID, string(message))
-
-		// Обработка полученного сообщения
-		if messageHandler != nil {
-			messageHandler(message, c)
+		// Безопасный вызов обработчика с recover
+		if handlerErr := safeHandleMessage(message, c, messageHandler); handlerErr != nil {
+			// Если обработчик вернул ошибку, считаем ее фатальной для соединения
+			log.Printf("WebSocket Client Handler Error (UserID: %s, ConnID: %s): %v. Closing connection.", c.UserID, c.ConnectionID, handlerErr)
+			break // Закрываем соединение
 		}
 	}
 }
 
-// writePump перекачивает сообщения из hub клиенту через WebSocket соединение.
+// safeHandleMessage - обертка для вызова обработчика с recover
+// Возвращает ошибку, если обработчик вернул ошибку.
+func safeHandleMessage(message []byte, client *Client, messageHandler func(message []byte, client *Client) error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("PANIC recovered in message handler for UserID: %s, ConnID: %s. Panic: %v\nStack trace:\n%s",
+				client.UserID, client.ConnectionID, r, string(debug.Stack()))
+			// Паника считается фатальной ошибкой для обработчика
+			err = fmt.Errorf("panic recovered: %v", r)
+			// Можно отправить сообщение об ошибке клиенту, если это уместно
+			// client.sendError("internal_error", "Failed to process message due to an internal error")
+		}
+	}()
+	// Вызов оригинального обработчика
+	message = bytes.TrimSpace(bytes.Replace(message, newline, space, -1))
+	if messageHandler != nil {
+		err = messageHandler(message, client) // Сохраняем возвращенную ошибку
+	} else {
+		log.Printf("Warning: No message handler registered for client %s", client.UserID)
+	}
+	return err // Возвращаем ошибку (или nil)
+}
+
+// writePump отправляет сообщения клиенту из канала send
 func (c *Client) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
-		log.Printf("WebSocket writePump: client %s disconnected", c.UserID)
 		ticker.Stop()
+		// Закрываем соединение при завершении writePump
 		c.conn.Close()
+		log.Printf("WebSocket Client Write Pump STOPPED for UserID: %s, ConnID: %s", c.UserID, c.ConnectionID)
 	}()
 
-	log.Printf("WebSocket writePump: started for client %s", c.UserID)
+	log.Printf("WebSocket Client Write Pump STARTED for UserID: %s, ConnID: %s", c.UserID, c.ConnectionID)
 
 	for {
 		select {
 		case message, ok := <-c.send:
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if !ok {
-				// Hub закрыл канал.
-				log.Printf("WebSocket writePump: hub closed channel for client %s", c.UserID)
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
-				return
+			// Сразу после чтения из c.send
+			log.Printf("[Client %s][Conn %s] Dequeued message for writing. Type: %s. Current send buffer len: %d", c.UserID, c.ConnectionID, messageTypeFromBytes(message), len(c.send))
+
+			// Устанавливаем таймаут для записи
+			if err := c.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
+				log.Printf("WebSocket Client SetWriteDeadline Error (UserID: %s, ConnID: %s): %v", c.UserID, c.ConnectionID, err)
+				// Ошибку установки дедлайна можно считать фатальной для записи
+				return // Завершаем горутину записи
 			}
 
+			if !ok {
+				// Канал send закрыт (хаб или шард закрыли канал клиента)
+				log.Printf("WebSocket Client Send Channel Closed (UserID: %s, ConnID: %s)", c.UserID, c.ConnectionID)
+				// Отправляем сообщение о закрытии клиенту, если соединение еще открыто
+				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return // Завершаем горутину записи
+			}
+
+			// Получаем writer для отправки сообщения
 			w, err := c.conn.NextWriter(websocket.TextMessage)
 			if err != nil {
-				log.Printf("WebSocket writePump: error getting writer for client %s: %v", c.UserID, err)
-				return
+				log.Printf("WebSocket Client NextWriter Error (UserID: %s, ConnID: %s): %v", c.UserID, c.ConnectionID, err)
+				return // Завершаем горутину записи
 			}
 
-			// Успешная отправка сообщения - обновляем время активности
-			c.lastActivity = time.Now()
+			// Пишем сообщение
+			log.Printf("[Client %s][Conn %s] Attempting WriteMessage. Type: %s", c.UserID, c.ConnectionID, messageTypeFromBytes(message)) // Лог перед записью
+			if _, err := w.Write(message); err != nil {
+				log.Printf("WebSocket Client Write Error (UserID: %s, ConnID: %s): %v", c.UserID, c.ConnectionID, err)
+				// Не выходим сразу, пытаемся закрыть writer
+			}
 
-			log.Printf("WebSocket writePump: writing message to client %s: %s", c.UserID, string(message))
-			w.Write(message)
-
-			// Добавляем все ожидающие сообщения в текущий WebSocket message.
+			// Добавляем оставшиеся сообщения в очереди в текущее сообщение WebSocket (оптимизация)
 			n := len(c.send)
 			for i := 0; i < n; i++ {
 				w.Write(newline)
 				w.Write(<-c.send)
 			}
 
+			// Закрываем writer, чтобы отправить сообщение
 			if err := w.Close(); err != nil {
-				log.Printf("WebSocket writePump: error closing writer for client %s: %v", c.UserID, err)
-				return
+				log.Printf("WebSocket Client Writer Close Error (UserID: %s, ConnID: %s): %v", c.UserID, c.ConnectionID, err)
+				return // Завершаем горутину записи
 			}
+			// Лог после успешной записи
+			log.Printf("[Client %s][Conn %s] Successfully wrote message. Type: %s", c.UserID, c.ConnectionID, messageTypeFromBytes(message))
+
 		case <-ticker.C:
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				log.Printf("WebSocket writePump: error sending ping to client %s: %v", c.UserID, err)
-				return
+			// Отправляем ping клиенту
+			if err := c.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
+				log.Printf("WebSocket Client SetWriteDeadline (Ping) Error (UserID: %s, ConnID: %s): %v", c.UserID, c.ConnectionID, err)
+				return // Завершаем горутину записи
 			}
-
-			// Успешная отправка ping - обновляем время активности
-			c.lastActivity = time.Now()
-
-			log.Printf("WebSocket writePump: ping sent to client %s", c.UserID)
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				log.Printf("WebSocket Client Ping Error (UserID: %s, ConnID: %s): %v", c.UserID, c.ConnectionID, err)
+				return // Завершаем горутину записи при ошибке пинга
+			}
+			// Логируем отправку пинга (можно сделать реже или убрать)
+			// log.Printf("Sent ping to client %s", c.UserID)
 		}
 	}
 }
 
-// StartPumps запускает goroutine для чтения и записи
-func (c *Client) StartPumps(messageHandler func(message []byte, client *Client)) {
+// StartPumps запускает горутины для чтения и записи сообщений
+func (c *Client) StartPumps(messageHandler func(message []byte, client *Client) error) {
 	if c.UserID == "" {
 		log.Printf("WebSocket: client has no UserID, skipping registration")
 		c.conn.Close()
@@ -387,4 +456,21 @@ func (c *Client) RemoveRole(role string) {
 	defer c.subMutex.Unlock()
 	delete(c.roles, role)
 	log.Printf("WebSocket: у клиента %s удалена роль %s", c.UserID, role)
+}
+
+// --- Вспомогательные функции ---
+
+// messageTypeFromBytes пытается извлечь тип сообщения из JSON байтов
+func messageTypeFromBytes(message []byte) string {
+	// Добавляем импорт encoding/json локально, если его нет вверху файла
+	// import "encoding/json"
+	var event struct {
+		Type string `json:"type"`
+	}
+	// Используем json.Unmarshal вместо json.NewDecoder().Decode(), чтобы не требовать io.Reader
+	if json.Unmarshal(message, &event) == nil && event.Type != "" {
+		return event.Type
+	}
+	// Возвращаем строку, указывающую на возможный бинарный формат или ошибку парсинга
+	return "unknown/binary"
 }

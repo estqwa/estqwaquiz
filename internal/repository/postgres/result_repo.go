@@ -90,11 +90,11 @@ func (r *ResultRepo) CalculateRanks(quizID uint) error {
 	totalQuestions := len(quiz.Questions)
 	prizeFundPerUser := 0
 
-	// Определяем победителей (ответившие на все вопросы правильно)
+	// Определяем победителей (ответившие на все вопросы правильно И не выбывшие)
 	var winners []entity.Result
 	if totalQuestions > 0 {
 		for _, result := range results {
-			if result.CorrectAnswers == totalQuestions {
+			if result.CorrectAnswers == totalQuestions && !result.IsEliminated {
 				winners = append(winners, result)
 			}
 		}
@@ -106,6 +106,8 @@ func (r *ResultRepo) CalculateRanks(quizID uint) error {
 	// Распределяем призовой фонд между победителями
 	if len(winners) > 0 {
 		prizeFundPerUser = totalPrizeFund / len(winners)
+	} else {
+		prizeFundPerUser = 0 // Явно устанавливаем 0, если победителей нет
 	}
 
 	// Вычисляем ранги с учетом одинаковых очков
@@ -115,7 +117,7 @@ func (r *ResultRepo) CalculateRanks(quizID uint) error {
 		results[0].Rank = currentRank
 
 		// Отмечаем победителей и устанавливаем призовой фонд
-		if totalQuestions > 0 && results[0].CorrectAnswers == totalQuestions {
+		if totalQuestions > 0 && results[0].CorrectAnswers == totalQuestions && !results[0].IsEliminated {
 			results[0].IsWinner = true
 			results[0].PrizeFund = prizeFundPerUser
 		} else {
@@ -123,7 +125,7 @@ func (r *ResultRepo) CalculateRanks(quizID uint) error {
 			results[0].PrizeFund = 0
 		}
 
-		// Обновляем первый результат
+		// Обновляем первый результат (только rank, is_winner, prize_fund)
 		if err := r.db.Model(&entity.Result{}).
 			Where("id = ?", results[0].ID).
 			Updates(map[string]interface{}{
@@ -150,7 +152,7 @@ func (r *ResultRepo) CalculateRanks(quizID uint) error {
 			results[i].Rank = currentRank
 
 			// Определяем, является ли игрок победителем
-			if totalQuestions > 0 && results[i].CorrectAnswers == totalQuestions {
+			if totalQuestions > 0 && results[i].CorrectAnswers == totalQuestions && !results[i].IsEliminated {
 				results[i].IsWinner = true
 				results[i].PrizeFund = prizeFundPerUser
 			} else {
@@ -158,7 +160,7 @@ func (r *ResultRepo) CalculateRanks(quizID uint) error {
 				results[i].PrizeFund = 0
 			}
 
-			// Обновляем результат в БД
+			// Обновляем результат в БД (только rank, is_winner, prize_fund)
 			if err := r.db.Model(&entity.Result{}).
 				Where("id = ?", results[i].ID).
 				Updates(map[string]interface{}{
@@ -179,4 +181,13 @@ func (r *ResultRepo) GetQuizUserAnswers(quizID uint) ([]entity.UserAnswer, error
 	var answers []entity.UserAnswer
 	err := r.db.Where("quiz_id = ?", quizID).Find(&answers).Error
 	return answers, err
+}
+
+// GetQuizWinners возвращает список победителей викторины
+func (r *ResultRepo) GetQuizWinners(quizID uint) ([]entity.Result, error) {
+	var winners []entity.Result
+	err := r.db.Where("quiz_id = ? AND is_winner = true", quizID).
+		Order("score DESC"). // Сортируем победителей по очкам
+		Find(&winners).Error
+	return winners, err
 }

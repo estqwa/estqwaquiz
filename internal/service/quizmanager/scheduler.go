@@ -242,18 +242,20 @@ func (s *Scheduler) triggerAnnouncement(ctx context.Context, quiz *entity.Quiz) 
 		"minutes_to_start": int(timeToStart.Minutes()),
 	}
 
-	s.deps.WSManager.BroadcastEvent("quiz:announcement", announcementData)
+	// Используем новую сигнатуру
+	fullEvent := map[string]interface{}{ // Или websocket.Event
+		"type": "quiz:announcement",
+		"data": announcementData,
+	}
+	s.deps.WSManager.BroadcastEventToQuiz(quiz.ID, fullEvent)
 }
 
 // triggerWaitingRoom открывает зал ожидания для викторины
 func (s *Scheduler) triggerWaitingRoom(ctx context.Context, quiz *entity.Quiz) {
 	log.Printf("[Scheduler] Открытие зала ожидания для викторины #%d", quiz.ID)
 
-	// Рассчитываем оставшееся время, защищаясь от отрицательных значений
-	secondsLeft := int(time.Until(quiz.ScheduledTime).Seconds())
-	if secondsLeft < 0 {
-		secondsLeft = 0
-	}
+	// Рассчитываем оставшееся время до старта викторины
+	timeToStart := time.Until(quiz.ScheduledTime)
 
 	waitingRoomData := map[string]interface{}{
 		"quiz_id":           quiz.ID,
@@ -261,79 +263,104 @@ func (s *Scheduler) triggerWaitingRoom(ctx context.Context, quiz *entity.Quiz) {
 		"description":       quiz.Description,
 		"scheduled_time":    quiz.ScheduledTime,
 		"question_count":    quiz.QuestionCount,
-		"starts_in_seconds": secondsLeft,
+		"starts_in_seconds": int(timeToStart.Seconds()),
 	}
 
-	s.deps.WSManager.BroadcastEvent("quiz:waiting_room", waitingRoomData)
+	// Используем новую сигнатуру
+	fullEvent := map[string]interface{}{ // Или websocket.Event
+		"type": "quiz:waiting_room",
+		"data": waitingRoomData,
+	}
+	s.deps.WSManager.BroadcastEventToQuiz(quiz.ID, fullEvent)
 }
 
-// triggerCountdown запускает обратный отсчет
+// triggerCountdown запускает обратный отсчет для викторины
 func (s *Scheduler) triggerCountdown(ctx context.Context, quiz *entity.Quiz) {
 	log.Printf("[Scheduler] Запуск обратного отсчета для викторины #%d", quiz.ID)
 
-	// Создаем отдельный контекст для отсчета с возможностью отмены
-	countdownCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
 
-	// Запускаем отсчет от N до 0 секунд
-	for i := s.config.CountdownSeconds; i >= 0; i-- {
-		// Проверяем контекст перед отправкой
+	// Отправляем сообщение каждые 10 секунд и в последние 5 секунд
+	lastAnnouncedTens := -1
+
+	for {
 		select {
-		case <-countdownCtx.Done():
-			log.Printf("[Scheduler] Обратный отсчет отменен для викторины #%d", quiz.ID)
-			return
-		default:
-			// Продолжаем отсчет
-		}
+		case <-ticker.C:
+			remainingTime := time.Until(quiz.ScheduledTime)
+			secondsLeft := int(remainingTime.Seconds())
 
-		countdownData := map[string]interface{}{
-			"quiz_id":      quiz.ID,
-			"seconds_left": i,
-		}
-
-		s.deps.WSManager.BroadcastEvent("quiz:countdown", countdownData)
-
-		// Логируем только каждые 10 секунд и последние 5 секунд
-		if i%10 == 0 || i < 5 {
-			log.Printf("[Scheduler] Обратный отсчет викторины #%d: %d сек.", quiz.ID, i)
-		}
-
-		// Проверяем контекст перед сном, если это не последняя итерация
-		if i > 0 {
-			// Вычисляем точное время для следующей секунды
-			nextSecond := time.Now().Add(1 * time.Second)
-			timeToWait := time.Until(nextSecond)
-
-			select {
-			case <-countdownCtx.Done():
-				log.Printf("[Scheduler] Обратный отсчет отменен для викторины #%d", quiz.ID)
+			if secondsLeft <= 0 {
+				log.Printf("[Scheduler] Обратный отсчет завершен для викторины #%d, запуск викторины", quiz.ID)
+				s.triggerQuizStart(ctx, quiz)
 				return
-			case <-time.After(timeToWait):
-				// Продолжаем отсчет
 			}
+
+			// Отправка уведомлений
+			shouldAnnounce := false
+			if secondsLeft <= 5 {
+				shouldAnnounce = true
+			} else if secondsLeft%10 == 0 {
+				currentTens := secondsLeft / 10
+				if currentTens != lastAnnouncedTens {
+					shouldAnnounce = true
+					lastAnnouncedTens = currentTens
+				}
+			}
+
+			if shouldAnnounce {
+				log.Printf("[Scheduler] Обратный отсчет викторины #%d: %d сек.", quiz.ID, secondsLeft)
+				countdownData := map[string]interface{}{
+					"quiz_id":      quiz.ID,
+					"seconds_left": secondsLeft,
+				}
+				// s.deps.WSManager.BroadcastEventToQuiz(quiz.ID, "quiz:countdown", countdownData)
+				// Используем новую сигнатуру
+				fullEvent := map[string]interface{}{ // Или websocket.Event
+					"type": "quiz:countdown",
+					"data": countdownData,
+				}
+				s.deps.WSManager.BroadcastEventToQuiz(quiz.ID, fullEvent)
+			}
+
+		case <-ctx.Done():
+			log.Printf("[Scheduler] Обратный отсчет для викторины #%d отменен", quiz.ID)
+			return
 		}
 	}
-
-	// Сигнализируем о начале викторины после завершения отсчета
-	log.Printf("[Scheduler] Обратный отсчет завершен для викторины #%d, запуск викторины", quiz.ID)
-	s.triggerQuizStart(ctx, quiz)
 }
 
-// triggerQuizStart сигнализирует о начале викторины
+// triggerQuizStart запускает викторину
 func (s *Scheduler) triggerQuizStart(ctx context.Context, quiz *entity.Quiz) {
 	log.Printf("[Scheduler] Запуск викторины #%d", quiz.ID)
 
-	// Обновляем статус в БД
+	// Обновляем статус викторины в БД
 	if err := s.deps.QuizRepo.UpdateStatus(quiz.ID, "in_progress"); err != nil {
-		log.Printf("[Scheduler] Ошибка при обновлении статуса викторины #%d: %v", quiz.ID, err)
-		// Продолжаем несмотря на ошибку
+		log.Printf("[Scheduler] Ошибка при обновлении статуса викторины #%d на in_progress: %v", quiz.ID, err)
+		// Продолжаем, т.к. отмена уже невозможна
 	}
 
-	// Отправляем уведомление в канал для запуска викторины
+	// Отправляем событие запуска
+	startEvent := map[string]interface{}{
+		"quiz_id":        quiz.ID,
+		"title":          quiz.Title,
+		"question_count": quiz.QuestionCount,
+	}
+	// s.deps.WSManager.BroadcastEventToQuiz(quiz.ID, "quiz:start", startEvent)
+	// Используем новую сигнатуру
+	fullEvent := map[string]interface{}{ // Или websocket.Event
+		"type": "quiz:start",
+		"data": startEvent,
+	}
+	s.deps.WSManager.BroadcastEventToQuiz(quiz.ID, fullEvent)
+	log.Printf("[Scheduler] Уведомление о запуске викторины #%d отправлено", quiz.ID)
+
+	// Сигнализируем QuizManager о запуске викторины
+	// Используем неблокирующую отправку на случай, если канал переполнен
 	select {
 	case s.quizStartCh <- quiz.ID:
-		log.Printf("[Scheduler] Уведомление о запуске викторины #%d отправлено", quiz.ID)
+		log.Printf("[Scheduler] Сигнал о запуске викторины #%d отправлен в QuizManager", quiz.ID)
 	default:
-		log.Printf("[Scheduler] Ошибка: канал запуска викторин заполнен, пропускаю уведомление для #%d", quiz.ID)
+		log.Printf("[Scheduler] Предупреждение: не удалось отправить сигнал о запуске викторины #%d в QuizManager (канал переполнен?)", quiz.ID)
 	}
 }

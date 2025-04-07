@@ -8,6 +8,11 @@
     <script type="module" src="app.js"></script>
     <script type="module">
         import authService from './authService.js';
+        import { formatDate, DateFormat } from './dateUtils.js';
+
+        // Экспортируем formatDate в глобальную область для использования в встроенных скриптах
+        window.formatDate = formatDate;
+        window.DateFormat = DateFormat;
 
         document.addEventListener('DOMContentLoaded', async () => {
             // Проверяем авторизацию перед отображением страницы
@@ -69,9 +74,9 @@
                             ${isCurrent ? '<span class="current-badge">Текущая сессия</span>' : ''}
                         </div>
                         <p><strong>IP:</strong> ${session.ip_address}</p>
-                        <p><strong>Устройство:</strong> ${session.user_agent}</p>
-                        <p><strong>Создана:</strong> ${formatDate(createdDate)}</p>
-                        <p><strong>Истекает:</strong> ${formatDate(expiresDate)}</p>
+                        <p><strong>Последнее использование:</strong> ${formatDate(session.last_used_at, DateFormat.MEDIUM)}</p>
+                        <p><strong>Создана:</strong> ${formatDate(createdDate, DateFormat.SHORT)}</p>
+                        <p><strong>Истекает:</strong> ${formatDate(expiresDate, DateFormat.SHORT)}</p>
                     </div>
                     <div class="session-actions">
                         ${!isCurrent ? `<button class="btn btn-danger session-logout" data-id="${session.id}">Завершить</button>` : ''}
@@ -151,17 +156,6 @@
             else browser = 'Браузер';
 
             return `${device} / ${browser}`;
-        }
-
-        // Форматирование даты
-        function formatDate(date) {
-            return new Intl.DateTimeFormat('ru', {
-                day: '2-digit',
-                month: '2-digit',
-                year: 'numeric',
-                hour: '2-digit',
-                minute: '2-digit'
-            }).format(date);
         }
 
         // Отображение сообщения об ошибке

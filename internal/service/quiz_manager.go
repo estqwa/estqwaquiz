@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/yourusername/trivia-api/internal/domain/entity"
 	"github.com/yourusername/trivia-api/internal/domain/repository"
 	"github.com/yourusername/trivia-api/internal/service/quizmanager"
 	"github.com/yourusername/trivia-api/internal/websocket"
+	"gorm.io/gorm"
 )
 
 // QuizManager координирует работу компонентов для управления викторинами
@@ -22,16 +24,18 @@ type QuizManager struct {
 	// Репозитории для прямого доступа
 	quizRepo      repository.QuizRepository
 	resultService *ResultService
+	wsManager     *websocket.Manager
 
 	// Состояние активной викторины
 	activeQuizState *quizmanager.ActiveQuizState
+	stateMutex      sync.RWMutex
 
 	// Контекст для управления жизненным циклом
 	ctx    context.Context
 	cancel context.CancelFunc
 
 	// Зависимости
-	deps *quizmanager.Dependencies
+	// deps *quizmanager.Dependencies
 }
 
 // NewQuizManager создает новый экземпляр менеджера викторин
@@ -42,6 +46,7 @@ func NewQuizManager(
 	resultService *ResultService,
 	cacheRepo repository.CacheRepository,
 	wsManager *websocket.Manager,
+	db *gorm.DB,
 ) *QuizManager {
 	// Создаем контекст для управления жизненным циклом
 	ctx, cancel := context.WithCancel(context.Background())
@@ -49,7 +54,7 @@ func NewQuizManager(
 	// Создаем конфигурацию
 	config := quizmanager.DefaultConfig()
 
-	// Собираем зависимости
+	// Собираем зависимости для компонентов
 	deps := &quizmanager.Dependencies{
 		QuizRepo:      quizRepo,
 		QuestionRepo:  questionRepo,
@@ -70,9 +75,9 @@ func NewQuizManager(
 		answerProcessor: answerProcessor,
 		quizRepo:        quizRepo,
 		resultService:   resultService,
+		wsManager:       wsManager,
 		ctx:             ctx,
 		cancel:          cancel,
-		deps:            deps,
 	}
 
 	// Запускаем слушателя событий
@@ -101,8 +106,11 @@ func (qm *QuizManager) handleEvents() {
 
 		case <-questionDoneCh:
 			// Обрабатываем событие завершения вопросов
-			if qm.activeQuizState != nil && qm.activeQuizState.Quiz != nil {
-				go qm.finishQuiz(qm.activeQuizState.Quiz.ID)
+			qm.stateMutex.RLock()
+			activeState := qm.activeQuizState
+			qm.stateMutex.RUnlock()
+			if activeState != nil && activeState.Quiz != nil {
+				go qm.finishQuiz(activeState.Quiz.ID)
 			}
 		}
 	}
@@ -138,12 +146,25 @@ func (qm *QuizManager) handleQuizStart(quizID uint) {
 	}
 
 	// Создаем состояние активной викторины
-	qm.activeQuizState = quizmanager.NewActiveQuizState(quiz)
+	newState := quizmanager.NewActiveQuizState(quiz)
+
+	// Блокируем для записи
+	qm.stateMutex.Lock()
+	// Проверяем, не запущена ли уже другая викторина (на всякий случай)
+	if qm.activeQuizState != nil {
+		log.Printf("[QuizManager] WARNING: Попытка запустить викторину #%d, когда викторина #%d уже активна!", quizID, qm.activeQuizState.Quiz.ID)
+		qm.stateMutex.Unlock()
+		return
+	}
+	qm.activeQuizState = newState
+	qm.stateMutex.Unlock()
 
 	// Запускаем процесс отправки вопросов
 	go func() {
-		if err := qm.questionManager.RunQuizQuestions(qm.ctx, qm.activeQuizState); err != nil {
+		if err := qm.questionManager.RunQuizQuestions(qm.ctx, newState); err != nil {
 			log.Printf("[QuizManager] Ошибка при выполнении викторины #%d: %v", quizID, err)
+			// В случае ошибки выполнения, также завершаем викторину
+			qm.finishQuiz(quizID)
 		}
 	}()
 }
@@ -152,8 +173,12 @@ func (qm *QuizManager) handleQuizStart(quizID uint) {
 func (qm *QuizManager) finishQuiz(quizID uint) {
 	log.Printf("[QuizManager] Завершение викторины #%d", quizID)
 
+	// Блокируем для чтения и записи
+	qm.stateMutex.Lock()
+	defer qm.stateMutex.Unlock() // Гарантируем разблокировку
+
 	if qm.activeQuizState == nil || qm.activeQuizState.Quiz == nil || qm.activeQuizState.Quiz.ID != quizID {
-		log.Printf("[QuizManager] Ошибка: викторина #%d не является активной", quizID)
+		log.Printf("[QuizManager] Ошибка: викторина #%d не является активной или уже завершена.", quizID)
 		return
 	}
 
@@ -178,45 +203,43 @@ func (qm *QuizManager) finishQuiz(quizID uint) {
 	}
 
 	// Отправляем всем участникам через WebSocket-менеджер
-	wsManager := qm.deps.WSManager
-	if err := wsManager.BroadcastEvent("quiz:finish", finishEvent); err != nil {
+	// if err := qm.wsManager.BroadcastEventToQuiz(quizID, "quiz:finish", finishEvent); err != nil {
+	// Используем новую сигнатуру
+	fullEvent := map[string]interface{}{ // Или websocket.Event
+		"type": "quiz:finish",
+		"data": finishEvent,
+	}
+	if err := qm.wsManager.BroadcastEventToQuiz(quizID, fullEvent); err != nil {
 		log.Printf("[QuizManager] Ошибка при отправке события о завершении викторины #%d: %v", quizID, err)
 	}
 
+	// --- Вызов определения победителей ---
+	// Запускаем асинхронно, чтобы не блокировать завершение викторины
+	go func(ctx context.Context, currentQuizID uint) {
+		// Даем небольшую задержку, чтобы убедиться, что все последние события обработаны
+		time.Sleep(2 * time.Second)
+		if err := qm.resultService.DetermineWinnersAndAllocatePrizes(ctx, currentQuizID); err != nil {
+			log.Printf("[QuizManager] Ошибка при определении победителей для викторины #%d: %v", currentQuizID, err)
+		}
+	}(qm.ctx, quizID) // Передаем quizID в горутину
+
 	// Сбрасываем активную викторину
 	qm.activeQuizState = nil
-
-	// Подсчитываем и отправляем результаты (асинхронно)
-	go qm.calculateAndSendResults(quizID)
-}
-
-// calculateAndSendResults подсчитывает и отправляет результаты викторины
-func (qm *QuizManager) calculateAndSendResults(quizID uint) {
-	log.Printf("[QuizManager] Подсчет и отправка результатов для викторины #%d", quizID)
-
-	// Здесь могла бы быть логика получения участников викторины
-	// и вычисления результатов для каждого
-
-	// Пока просто отправляем событие о том, что результаты доступны
-	resultsAvailableEvent := map[string]interface{}{
-		"quiz_id": quizID,
-		"message": "Результаты викторины доступны",
-	}
-
-	// Отправляем событие всем пользователям через WebSocket-менеджер
-	if err := qm.deps.WSManager.BroadcastEvent("quiz:results_available", resultsAvailableEvent); err != nil {
-		log.Printf("[QuizManager] Ошибка при отправке события о доступности результатов: %v", err)
-	}
 }
 
 // ProcessAnswer обрабатывает ответ пользователя на вопрос
 func (qm *QuizManager) ProcessAnswer(userID, questionID uint, selectedOption int, timestamp int64) error {
-	if qm.activeQuizState == nil {
+	// Блокируем для чтения
+	qm.stateMutex.RLock()
+	activeState := qm.activeQuizState
+	qm.stateMutex.RUnlock()
+
+	if activeState == nil {
 		return fmt.Errorf("нет активной викторины")
 	}
 
 	return qm.answerProcessor.ProcessAnswer(
-		qm.ctx, userID, questionID, selectedOption, timestamp, qm.activeQuizState)
+		qm.ctx, userID, questionID, selectedOption, timestamp, activeState)
 }
 
 // HandleReadyEvent обрабатывает событие готовности пользователя
@@ -226,6 +249,10 @@ func (qm *QuizManager) HandleReadyEvent(userID uint, quizID uint) error {
 
 // GetActiveQuiz возвращает активную викторину
 func (qm *QuizManager) GetActiveQuiz() *entity.Quiz {
+	// Блокируем для чтения
+	qm.stateMutex.RLock()
+	defer qm.stateMutex.RUnlock()
+
 	if qm.activeQuizState == nil {
 		return nil
 	}

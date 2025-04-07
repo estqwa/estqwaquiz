@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -16,7 +17,10 @@ import (
 type JWTCustomClaims struct {
 	UserID uint   `json:"user_id"`
 	Email  string `json:"email"`
+	Role   string `json:"role"`
 	jwt.RegisteredClaims
+	// Add specific claim for WS ticket identification
+	Usage string `json:"usage,omitempty"`
 }
 
 // JWTService предоставляет методы для работы с JWT
@@ -29,32 +33,64 @@ type JWTService struct {
 	mu sync.RWMutex
 	// Репозиторий для персистентного хранения инвалидированных токенов
 	invalidTokenRepo repository.InvalidTokenRepository
+	// Add field for WS ticket expiry
+	wsTicketExpiry time.Duration
+	// Интервал для очистки кеша
+	cleanupInterval time.Duration
 }
 
 // NewJWTService создает новый сервис JWT
-func NewJWTService(secretKey string, expirationHrs int, invalidTokenRepo repository.InvalidTokenRepository) *JWTService {
+func NewJWTService(secretKey string, expirationHrs int, invalidTokenRepo repository.InvalidTokenRepository, wsTicketExpirySec int, cleanupInterval time.Duration) *JWTService {
+	if secretKey == "" {
+		log.Fatal("JWT secret key is required")
+	}
+	if invalidTokenRepo == nil {
+		log.Fatal("InvalidTokenRepository is required for JWTService")
+	}
+	// Default expiry if not set or invalid
+	if expirationHrs <= 0 {
+		expirationHrs = 24 // Default to 24 hours
+	}
+	wsExpiry := time.Duration(wsTicketExpirySec) * time.Second
+	if wsExpiry <= 0 {
+		wsExpiry = 60 * time.Second // Default to 60 seconds
+	}
+	// Default cleanup interval if not set or invalid
+	if cleanupInterval <= 0 {
+		cleanupInterval = 1 * time.Hour
+	}
+
 	service := &JWTService{
 		secretKey:        secretKey,
 		expirationHrs:    expirationHrs,
 		invalidatedUsers: make(map[uint]time.Time),
 		invalidTokenRepo: invalidTokenRepo,
+		wsTicketExpiry:   wsExpiry, // Store configured WS ticket expiry
+		cleanupInterval:  cleanupInterval,
 	}
 
+	// Создаем контекст для загрузки из БД при старте
+	startupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
 	// Загружаем инвалидированные токены из БД при создании сервиса
-	service.loadInvalidatedTokensFromDB()
+	service.loadInvalidatedTokensFromDB(startupCtx)
+
+	// Запускаем периодическую очистку кеша
+	go service.runCleanupRoutine()
 
 	return service
 }
 
 // loadInvalidatedTokensFromDB загружает информацию об инвалидированных токенах из БД
-func (s *JWTService) loadInvalidatedTokensFromDB() {
+func (s *JWTService) loadInvalidatedTokensFromDB(ctx context.Context) {
 	// Если репозиторий не инициализирован, выходим
 	if s.invalidTokenRepo == nil {
 		log.Println("JWT: Repository not initialized, skipping DB load")
 		return
 	}
 
-	tokens, err := s.invalidTokenRepo.GetAllInvalidTokens()
+	tokens, err := s.invalidTokenRepo.GetAllInvalidTokens(ctx)
 	if err != nil {
 		log.Printf("JWT: Error loading invalidated tokens from DB: %v", err)
 		return
@@ -75,6 +111,7 @@ func (s *JWTService) GenerateToken(user *entity.User) (string, error) {
 	claims := &JWTCustomClaims{
 		UserID: user.ID,
 		Email:  user.Email,
+		// Role:   user.Role, // TODO: Uncomment and ensure user.Role exists when roles are implemented
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour * time.Duration(s.expirationHrs))),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -94,7 +131,8 @@ func (s *JWTService) GenerateToken(user *entity.User) (string, error) {
 }
 
 // ParseToken проверяет и расшифровывает JWT токен
-func (s *JWTService) ParseToken(tokenString string) (*JWTCustomClaims, error) {
+// Добавлен context.Context для вызова репозитория
+func (s *JWTService) ParseToken(ctx context.Context, tokenString string) (*JWTCustomClaims, error) {
 	claims := &JWTCustomClaims{}
 	token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -136,44 +174,32 @@ func (s *JWTService) ParseToken(tokenString string) (*JWTCustomClaims, error) {
 	}
 
 	// Проверяем, является ли токен WS-тикетом
-	if purpose, ok := token.Header["purpose"]; ok && purpose == "websocket_auth" {
+	if claims.Usage == "websocket_auth" {
 		log.Printf("[JWT] Проверка WS-тикета для пользователя ID=%d", claims.UserID)
 		// Для WS-тикетов пропускаем проверку инвалидации
 		return claims, nil
 	}
 
 	// Проверка на инвалидацию токена (только для обычных токенов, не для WS-тикетов)
-	isInvalidInDB := false
-	if s.invalidTokenRepo != nil {
-		var dbErr error
-		isInvalidInDB, dbErr = s.invalidTokenRepo.IsTokenInvalid(claims.UserID, claims.IssuedAt.Time)
-		if dbErr != nil {
-			log.Printf("[JWT] Ошибка при проверке инвалидации токена в БД: %v", dbErr)
-		}
-	}
-
 	isInvalidInMem := false
+	var invalidationTime time.Time // Переменная для хранения времени инвалидации
 	if claims.UserID > 0 {
 		s.mu.RLock()
-		invalidationTime, exists := s.invalidatedUsers[claims.UserID]
+		invTime, exists := s.invalidatedUsers[claims.UserID]
 		s.mu.RUnlock()
 
-		if exists && !claims.IssuedAt.Time.After(invalidationTime) {
-			isInvalidInMem = true
-			log.Printf("[JWT] Время выдачи токена: %v, время инвалидации: %v",
-				claims.IssuedAt.Time, invalidationTime)
+		if exists {
+			invalidationTime = invTime // Сохраняем время для логирования
+			// Если время выдачи токена НЕ ПОЗЖЕ времени инвалидации, токен недействителен
+			if !claims.IssuedAt.Time.After(invalidationTime) {
+				isInvalidInMem = true
+			}
 		}
 	}
 
-	if isInvalidInDB || isInvalidInMem {
-		if isInvalidInDB {
-			log.Printf("[JWT] Токен инвалидирован в БД для пользователя ID=%d, выдан в %v",
-				claims.UserID, claims.IssuedAt.Time)
-		}
-		if isInvalidInMem {
-			log.Printf("[JWT] Токен инвалидирован в памяти для пользователя ID=%d, выдан в %v",
-				claims.UserID, claims.IssuedAt.Time)
-		}
+	if isInvalidInMem {
+		log.Printf("[JWT] Токен инвалидирован (in-memory check) для пользователя ID=%d, выдан в %v, время инвалидации %v",
+			claims.UserID, claims.IssuedAt.Time, invalidationTime)
 		return nil, errors.New("token has been invalidated")
 	}
 
@@ -184,15 +210,17 @@ func (s *JWTService) ParseToken(tokenString string) (*JWTCustomClaims, error) {
 
 // InvalidateTokensForUser добавляет пользователя в черный список,
 // делая все ранее выданные токены недействительными
-func (s *JWTService) InvalidateTokensForUser(userID uint) error {
+// Добавлен context.Context
+func (s *JWTService) InvalidateTokensForUser(ctx context.Context, userID uint) error {
+	now := time.Now()
 	// Инвалидация в памяти
 	s.mu.Lock()
-	s.invalidatedUsers[userID] = time.Now()
+	s.invalidatedUsers[userID] = now
 	s.mu.Unlock()
 
 	// Инвалидация в БД
 	if s.invalidTokenRepo != nil {
-		err := s.invalidTokenRepo.AddInvalidToken(userID, time.Now())
+		err := s.invalidTokenRepo.AddInvalidToken(ctx, userID, now)
 		if err != nil {
 			log.Printf("[JWT] Ошибка при добавлении записи инвалидации в БД для пользователя ID=%d: %v",
 				userID, err)
@@ -200,13 +228,14 @@ func (s *JWTService) InvalidateTokensForUser(userID uint) error {
 		}
 	}
 
-	log.Printf("[JWT] Токены инвалидированы для пользователя ID=%d в %v", userID, time.Now())
+	log.Printf("[JWT] Токены инвалидированы для пользователя ID=%d в %v", userID, now)
 	return nil
 }
 
 // ResetInvalidationForUser удаляет пользователя из черного списка,
 // разрешая использование существующих токенов
-func (s *JWTService) ResetInvalidationForUser(userID uint) {
+// Добавлен context.Context
+func (s *JWTService) ResetInvalidationForUser(ctx context.Context, userID uint) {
 	if userID == 0 {
 		log.Printf("JWT: Попытка сброса инвалидации для некорректного UserID: %d", userID)
 		return
@@ -224,143 +253,174 @@ func (s *JWTService) ResetInvalidationForUser(userID uint) {
 
 	// Удаляем также из БД, если репозиторий инициализирован
 	if s.invalidTokenRepo != nil {
-		err := s.invalidTokenRepo.RemoveInvalidToken(userID)
+		err := s.invalidTokenRepo.RemoveInvalidToken(ctx, userID)
 		if err != nil {
-			log.Printf("JWT: Error removing invalidation from DB for UserID: %d: %v", userID, err)
-			// Продолжаем выполнение
+			log.Printf("[JWT] Ошибка при удалении записи инвалидации из БД для пользователя ID=%d: %v", userID, err)
+			// Ошибка удаления из БД не должна останавливать процесс, но ее нужно логировать
 		}
 	}
-
-	log.Printf("JWT: Инвалидация сброшена для пользователя ID=%d, токены снова действительны", userID)
 }
 
-// CleanupInvalidatedUsers удаляет записи об инвалидированных пользователях через 24 часа
-// Для предотвращения бесконечного роста карты
-func (s *JWTService) CleanupInvalidatedUsers() error {
-	// Увеличиваем период хранения инвалидированных токенов с 24 до 48 часов
-	// для большей безопасности
-	cutoffTime := time.Now().Add(-48 * time.Hour)
+// CleanupInvalidatedUsers удаляет устаревшие записи об инвалидированных токенах из БД и из кеша
+// Добавлен context.Context
+func (s *JWTService) CleanupInvalidatedUsers(ctx context.Context) error {
+	// Устанавливаем временной порог (например, старше срока жизни refresh-токена или заданного интервала)
+	// Здесь используем expirationHrs * 2, как пример
+	cutoffTime := time.Now().Add(-time.Hour * time.Duration(s.expirationHrs*2))
+	log.Printf("[JWTService] Running cleanup for entries older than %v", cutoffTime)
 
-	// Создаем список пользователей для удаления, чтобы не изменять
-	// карту во время итерации
-	var usersToRemove []uint
+	// Очистка БД
+	if s.invalidTokenRepo != nil {
+		err := s.invalidTokenRepo.CleanupOldInvalidTokens(ctx, cutoffTime)
+		if err != nil {
+			log.Printf("[JWTService] Error cleaning up invalid tokens from DB: %v", err)
+			// Продолжаем очистку кеша, даже если в БД была ошибка
+		}
+	}
 
-	// Очищаем в памяти
-	s.mu.Lock()
-	beforeCount := len(s.invalidatedUsers)
+	// Очистка кеша в памяти
+	s.mu.Lock() // Блокируем карту для записи
+	defer s.mu.Unlock()
+
+	cleanedCount := 0
 	for userID, invalidationTime := range s.invalidatedUsers {
 		if invalidationTime.Before(cutoffTime) {
-			usersToRemove = append(usersToRemove, userID)
+			delete(s.invalidatedUsers, userID)
+			cleanedCount++
 		}
 	}
+	log.Printf("[JWTService] Cleaned up %d stale entries from invalidatedUsers cache", cleanedCount)
 
-	// Удаляем из карты
-	for _, userID := range usersToRemove {
-		delete(s.invalidatedUsers, userID)
-	}
-	s.mu.Unlock()
-
-	// Если база данных доступна, очищаем также в ней
-	if s.invalidTokenRepo != nil {
-		if err := s.invalidTokenRepo.CleanupOldInvalidTokens(cutoffTime); err != nil {
-			log.Printf("JWT: Ошибка при очистке инвалидированных токенов в БД: %v", err)
-			return fmt.Errorf("ошибка очистки инвалидированных токенов в БД: %w", err)
-		}
-		log.Printf("JWT: Очистка устаревших записей об инвалидации в БД выполнена успешно")
-	} else {
-		log.Printf("JWT: Репозиторий токенов не доступен, очистка в БД не выполнена")
-	}
-
-	log.Printf("JWT: Удалено %d устаревших записей об инвалидации из памяти", len(usersToRemove))
-	log.Printf("JWT: Карта инвалидированных токенов: было %d, стало %d", beforeCount, len(s.invalidatedUsers))
 	return nil
+}
+
+// runCleanupRoutine запускает горутину для периодической очистки кеша
+func (s *JWTService) runCleanupRoutine() {
+	ticker := time.NewTicker(s.cleanupInterval)
+	defer ticker.Stop()
+
+	// Создаем контекст, который можно отменить при необходимости (пока нет Shutdown)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // Хотя cancel пока не вызывается
+
+	log.Printf("[JWTService] Starting periodic cleanup routine every %v", s.cleanupInterval)
+
+	for {
+		select {
+		case <-ticker.C:
+			log.Printf("[JWTService] Running periodic cleanup...")
+			if err := s.CleanupInvalidatedUsers(context.Background()); err != nil {
+				log.Printf("[JWTService] Error during periodic cleanup: %v", err)
+			}
+		case <-ctx.Done():
+			log.Printf("[JWTService] Cleanup routine stopped.")
+			return
+		}
+	}
 }
 
 // DebugToken анализирует JWT токен без проверки подписи
 // для диагностических целей
 func (s *JWTService) DebugToken(tokenString string) map[string]interface{} {
-	// Разбираем токен без проверки подписи
-	token, _ := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		return nil, nil
-	})
+	parser := jwt.Parser{}
+	token, parts, err := parser.ParseUnverified(tokenString, &JWTCustomClaims{})
 
 	result := make(map[string]interface{})
+	result["raw_token"] = tokenString
+	result["parts"] = parts
 
-	if token == nil {
-		result["valid"] = false
-		result["error"] = "невозможно разобрать токен"
+	if err != nil {
+		result["error"] = err.Error()
 		return result
 	}
 
-	// Получаем данные из токена
-	if claims, ok := token.Claims.(jwt.MapClaims); ok {
-		result["valid"] = false // Всегда false, т.к. подпись не проверяется
-		result["claims"] = claims
+	result["header"] = token.Header
+	result["claims"] = token.Claims
+	result["signature"] = token.Signature
+	result["method"] = token.Method.Alg()
 
-		// Извлекаем полезные поля
-		if userID, ok := claims["user_id"].(float64); ok {
-			result["user_id"] = uint(userID)
+	// Дополнительная информация из claims
+	if claims, ok := token.Claims.(*JWTCustomClaims); ok {
+		result["user_id"] = claims.UserID
+		result["email"] = claims.Email
+		result["role"] = claims.Role
+		if claims.Usage != "" {
+			result["usage"] = claims.Usage
 		}
-		if email, ok := claims["email"].(string); ok {
-			result["email"] = email
+		if claims.ExpiresAt != nil {
+			result["expires_at"] = claims.ExpiresAt.Time
+			result["is_expired"] = time.Now().After(claims.ExpiresAt.Time)
 		}
-		if exp, ok := claims["exp"].(float64); ok {
-			expTime := time.Unix(int64(exp), 0)
-			result["expires_at"] = expTime
-			result["expired"] = expTime.Before(time.Now())
+		if claims.IssuedAt != nil {
+			result["issued_at"] = claims.IssuedAt.Time
 		}
-		if iat, ok := claims["iat"].(float64); ok {
-			issuedAt := time.Unix(int64(iat), 0)
-			result["issued_at"] = issuedAt
-
-			// Проверяем инвалидацию
-			isInvalidated := false
-			var invalidationTime time.Time
-
-			if userID, ok := claims["user_id"].(float64); ok {
-				uid := uint(userID)
-				s.mu.RLock()
-				invTime, exists := s.invalidatedUsers[uid]
-				s.mu.RUnlock()
-
-				if exists {
-					invalidationTime = invTime
-					isInvalidated = !issuedAt.After(invTime)
-				}
-			}
-
-			result["invalidation_time"] = invalidationTime
-			result["is_invalidated"] = isInvalidated
-		}
-	} else {
-		result["error"] = "невозможно извлечь claims из токена"
 	}
 
 	return result
 }
 
-// GenerateWSTicket создает краткоживущий JWT токен специально для WebSocket подключения
+// ParseWSTicket проверяет JWT, используемый как WS тикет
+func (s *JWTService) ParseWSTicket(ticketString string) (*JWTCustomClaims, error) {
+	claims := &JWTCustomClaims{}
+	token, err := jwt.ParseWithClaims(ticketString, claims, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(s.secretKey), nil
+	})
+
+	if err != nil {
+		// Обработка ошибок валидации
+		if ve, ok := err.(*jwt.ValidationError); ok {
+			if ve.Errors&jwt.ValidationErrorExpired != 0 {
+				return nil, errors.New("ticket is expired")
+			}
+		}
+		return nil, fmt.Errorf("invalid ticket: %w", err)
+	}
+
+	if !token.Valid {
+		return nil, errors.New("invalid ticket")
+	}
+
+	// Проверяем claim 'usage'
+	if claims.Usage != "websocket_auth" {
+		return nil, errors.New("invalid ticket usage")
+	}
+
+	// Проверка инвалидации НЕ НУЖНА для WS тикетов
+
+	return claims, nil
+}
+
+// GenerateWSTicket создает короткоживущий JWT для аутентификации WebSocket
 func (s *JWTService) GenerateWSTicket(userID uint, email string) (string, error) {
 	claims := &JWTCustomClaims{
 		UserID: userID,
 		Email:  email,
+		Usage:  "websocket_auth", // Указываем назначение токена
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Second * 30)), // 30 секунд жизни
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(s.wsTicketExpiry)), // Используем настраиваемое время жизни
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
 	}
 
-	// Добавляем специальный claim для обозначения, что это WS-тикет
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	token.Header["purpose"] = "websocket_auth"
-
 	tokenString, err := token.SignedString([]byte(s.secretKey))
 	if err != nil {
 		log.Printf("[JWT] Ошибка генерации WS-тикета для пользователя ID=%d: %v", userID, err)
 		return "", err
 	}
 
-	log.Printf("[JWT] WS-тикет успешно сгенерирован для пользователя ID=%d, выдан в %v, истекает через 30 секунд",
-		userID, claims.IssuedAt)
+	log.Printf("[JWT] WS-тикет успешно сгенерирован для пользователя ID=%d, истекает через %v",
+		userID, s.wsTicketExpiry)
 	return tokenString, nil
+}
+
+// min возвращает минимальное из двух чисел
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

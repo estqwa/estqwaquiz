@@ -61,7 +61,7 @@ func (rt *RefreshToken) SessionInfo() map[string]interface{} {
 	return info
 }
 
-// TableName задает имя таблицы для GORM
+// TableName определяет имя таблицы для GORM
 func (RefreshToken) TableName() string {
 	return "refresh_tokens"
 }

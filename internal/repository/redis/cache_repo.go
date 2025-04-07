@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -11,12 +12,15 @@ import (
 
 // CacheRepo реализует repository.CacheRepository
 type CacheRepo struct {
-	client *redis.Client
+	client redis.UniversalClient
 	ctx    context.Context
 }
 
 // NewCacheRepo создает новый репозиторий кеша
-func NewCacheRepo(client *redis.Client) *CacheRepo {
+func NewCacheRepo(client redis.UniversalClient) *CacheRepo {
+	if client == nil {
+		log.Fatal("Redis client cannot be nil for CacheRepo")
+	}
 	return &CacheRepo{
 		client: client,
 		ctx:    context.Background(),
@@ -83,4 +87,10 @@ func (r *CacheRepo) Exists(key string) (bool, error) {
 // ExpireAt устанавливает время истечения ключа
 func (r *CacheRepo) ExpireAt(key string, expiration time.Time) error {
 	return r.client.ExpireAt(r.ctx, key, expiration).Err()
+}
+
+// SetNX устанавливает значение ключа, только если ключ не существует.
+// Возвращает true, если ключ был установлен, false - если ключ уже существовал.
+func (r *CacheRepo) SetNX(key string, value interface{}, expiration time.Duration) (bool, error) {
+	return r.client.SetNX(r.ctx, key, value, expiration).Result()
 }

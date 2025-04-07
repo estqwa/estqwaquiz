@@ -3,6 +3,7 @@ package websocket
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -10,7 +11,36 @@ import (
 	"time"
 
 	"github.com/go-redis/redis/v8"
+	"github.com/yourusername/trivia-api/internal/config"
 )
+
+// Определяем интерфейс здесь, так как создание файла не сработало
+// ClusterAwareHub определяет интерфейс для хаба, который может работать в кластере
+type ClusterAwareHub interface {
+	// BroadcastBytes отправляет байтовое сообщение всем локальным клиентам, принадлежащим этому хабу/шарду.
+	// Это НЕ отправляет сообщение в кластер.
+	BroadcastBytes(message []byte)
+
+	// BroadcastBytesLocal отправляет байтовое сообщение только локальным клиентам этого инстанса.
+	// Используется для предотвращения циклов при получении сообщения из кластера.
+	BroadcastBytesLocal(message []byte)
+
+	// SendToUser отправляет байтовое сообщение конкретному локальному пользователю.
+	// Возвращает true, если клиент найден локально и сообщение отправлено (или поставлено в очередь), иначе false.
+	SendToUser(userID string, message []byte) bool
+
+	// GetInstanceID возвращает уникальный ID этого экземпляра хаба.
+	GetInstanceID() string
+
+	// GetMetrics возвращает метрики этого экземпляра хаба (локальные метрики).
+	GetMetrics() map[string]interface{}
+
+	// AddClusterPeer добавляет или обновляет информацию о другом узле кластера.
+	AddClusterPeer(instanceID string, metrics json.RawMessage) // Используем json.RawMessage для метрик
+
+	// RemoveClusterPeer удаляет информацию об узле кластера.
+	RemoveClusterPeer(instanceID string)
+}
 
 // PubSubProvider определяет интерфейс для провайдеров публикации/подписки
 type PubSubProvider interface {
@@ -72,79 +102,43 @@ func (p *NoOpPubSub) Close() error {
 	return nil
 }
 
-// ClusterConfig содержит настройки кластера Hub
-type ClusterConfig struct {
-	// Включение режима кластера
-	Enabled bool
-
-	// Уникальный ID этого экземпляра Hub
-	InstanceID string
-
-	// Провайдер публикации/подписки
-	Provider PubSubProvider
-
-	// Канал для широковещательных сообщений
-	BroadcastChannel string
-
-	// Канал для прямых сообщений
-	DirectChannel string
-
-	// Канал для обмена метриками
-	MetricsChannel string
-
-	// Интервал обновления метрик
-	MetricsInterval time.Duration
-}
-
-// DefaultClusterConfig возвращает конфигурацию кластера по умолчанию
-func DefaultClusterConfig() ClusterConfig {
-	return ClusterConfig{
-		Enabled:          false,
-		InstanceID:       generateInstanceID(),
-		Provider:         &NoOpPubSub{},
-		BroadcastChannel: "trivia_ws_broadcast",
-		DirectChannel:    "trivia_ws_direct",
-		MetricsChannel:   "trivia_ws_metrics",
-		MetricsInterval:  30 * time.Second,
-	}
-}
-
-// generateInstanceID создает уникальный ID для экземпляра Hub
-func generateInstanceID() string {
-	return "instance_" + time.Now().Format("20060102150405") + "_" + randomString(8)
-}
-
-// randomString генерирует случайную строку указанной длины
-func randomString(length int) string {
-	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	result := make([]byte, length)
-	for i := range result {
-		result[i] = charset[time.Now().UnixNano()%int64(len(charset))]
-		time.Sleep(1 * time.Nanosecond) // Добавляем минимальную задержку для лучшей случайности
-	}
-	return string(result)
-}
-
-// ClusterHub управляет коммуникацией между экземплярами Hub
+// ClusterHub управляет взаимодействием экземпляра Hub с кластером через Pub/Sub
 type ClusterHub struct {
-	config  ClusterConfig
-	parent  interface{} // Ссылка на родительский хаб, меняем *ShardedHub на interface{}
-	ctx     context.Context
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-	metrics *HubMetrics
+	config config.ClusterConfig // Используем тип из пакета config
+	parent ClusterAwareHub      // Изменено с interface{} на ClusterAwareHub
+	// Добавляем провайдера сюда, так как он не в config.ClusterConfig
+	Provider PubSubProvider
+	ctx      context.Context
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
 }
 
-// NewClusterHub создает новый ClusterHub
-func NewClusterHub(parent interface{}, config ClusterConfig, metrics *HubMetrics) *ClusterHub {
+// NewClusterHub создает новый экземпляр ClusterHub
+func NewClusterHub(parent ClusterAwareHub, cfg config.ClusterConfig, provider PubSubProvider) *ClusterHub {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &ClusterHub{
-		config:  config,
-		parent:  parent,
-		ctx:     ctx,
-		cancel:  cancel,
-		metrics: metrics,
+	instanceID := cfg.InstanceID
+	if instanceID == "" {
+		instanceID = generateInstanceID()
+		log.Printf("ClusterHub: Instance ID не задан, сгенерирован: %s", instanceID)
 	}
+
+	// Проверяем провайдера
+	if provider == nil {
+		log.Println("ClusterHub: Провайдер Pub/Sub не предоставлен, используется NoOpPubSub")
+		provider = &NoOpPubSub{}
+	}
+
+	ch := &ClusterHub{
+		config:   cfg, // Сохраняем переданную конфигурацию
+		parent:   parent,
+		Provider: provider, // Сохраняем провайдера
+		ctx:      ctx,
+		cancel:   cancel,
+	}
+	// Устанавливаем правильный InstanceID в конфигурации, если он был сгенерирован
+	ch.config.InstanceID = instanceID
+
+	return ch
 }
 
 // Start запускает обработку сообщений кластера
@@ -209,7 +203,7 @@ func (ch *ClusterHub) BroadcastToCluster(payload []byte) error {
 		return err
 	}
 
-	return ch.config.Provider.Publish(ch.config.BroadcastChannel, data)
+	return ch.Provider.Publish(ch.config.BroadcastChannel, data)
 }
 
 // SendToUserInCluster отправляет сообщение конкретному пользователю через кластер
@@ -231,12 +225,12 @@ func (ch *ClusterHub) SendToUserInCluster(userID string, payload []byte) error {
 		return err
 	}
 
-	return ch.config.Provider.Publish(ch.config.DirectChannel, data)
+	return ch.Provider.Publish(ch.config.DirectChannel, data)
 }
 
 // handleBroadcastMessages обрабатывает входящие широковещательные сообщения
 func (ch *ClusterHub) handleBroadcastMessages() {
-	broadcastCh, err := ch.config.Provider.Subscribe(ch.ctx, ch.config.BroadcastChannel)
+	broadcastCh, err := ch.Provider.Subscribe(ch.ctx, ch.config.BroadcastChannel)
 	if err != nil {
 		log.Printf("ClusterHub: ошибка подписки на канал %s: %v", ch.config.BroadcastChannel, err)
 		return
@@ -256,283 +250,364 @@ func (ch *ClusterHub) handleBroadcastMessages() {
 
 			var msg ClusterMessage
 			if err := json.Unmarshal(data, &msg); err != nil {
-				log.Printf("ClusterHub: ошибка разбора широковещательного сообщения: %v", err)
+				log.Printf("ClusterHub: ошибка десериализации широковещательного сообщения: %v, Сообщение: %s", err, string(data))
 				continue
 			}
 
-			// Игнорируем сообщения от этого же экземпляра
-			if msg.InstanceID == ch.config.InstanceID {
+			// Пропускаем сообщения от самого себя
+			if msg.InstanceID == ch.parent.GetInstanceID() {
 				continue
 			}
 
-			// Передаем сообщение в Hub для рассылки
-			if ch.parent != nil {
+			if msg.MessageType == "broadcast" {
 				log.Printf("ClusterHub: получено широковещательное сообщение от %s", msg.InstanceID)
-				if sh, ok := ch.parent.(*ShardedHub); ok {
-					sh.BroadcastBytes([]byte(msg.Payload))
-				}
+				// Передаем сообщение родительскому хабу для локальной рассылки
+				// Используем BroadcastBytesLocal, чтобы избежать повторной отправки в кластер
+				ch.parent.BroadcastBytesLocal(msg.Payload)
+			} else if msg.MessageType == "metrics" {
+				// Обрабатываем метрики от другого узла
+				ch.parent.AddClusterPeer(msg.InstanceID, msg.Payload)
+			} else {
+				log.Printf("ClusterHub: получено неизвестное сообщение в broadcast канале от %s: %s", msg.InstanceID, msg.MessageType)
 			}
 		}
 	}
 }
 
-// handleDirectMessages обрабатывает входящие прямые сообщения
+// handleDirectMessages прослушивает канал прямых сообщений и обрабатывает их
 func (ch *ClusterHub) handleDirectMessages() {
-	directCh, err := ch.config.Provider.Subscribe(ch.ctx, ch.config.DirectChannel)
-	if err != nil {
-		log.Printf("ClusterHub: ошибка подписки на канал %s: %v", ch.config.DirectChannel, err)
+	defer ch.wg.Done()
+
+	if ch.config.DirectChannel == "" {
+		log.Println("[ClusterHub:Direct] Канал прямых сообщений не настроен, обработчик не запущен.")
 		return
 	}
 
-	log.Printf("ClusterHub: начата обработка прямых сообщений")
+	msgCh, err := ch.Provider.Subscribe(ch.ctx, ch.config.DirectChannel)
+	if err != nil {
+		log.Printf("[ClusterHub:Direct] CRITICAL: Не удалось подписаться на канал прямых сообщений %s: %v", ch.config.DirectChannel, err)
+		// TODO: Рассмотреть возможность отправки алерта
+		return
+	}
+	log.Printf("[ClusterHub:Direct] Успешно подписан на канал прямых сообщений: %s", ch.config.DirectChannel)
 
 	for {
 		select {
 		case <-ch.ctx.Done():
+			log.Println("[ClusterHub:Direct] Контекст отменен, завершение обработки прямых сообщений.")
 			return
-		case data, ok := <-directCh:
+		case msgBytes, ok := <-msgCh:
 			if !ok {
-				log.Println("ClusterHub: канал прямых сообщений закрыт")
-				return
+				log.Println("[ClusterHub:Direct] Канал прямых сообщений закрыт.")
+				return // Выход, если канал закрыт
 			}
 
 			var msg ClusterMessage
-			if err := json.Unmarshal(data, &msg); err != nil {
-				log.Printf("ClusterHub: ошибка разбора прямого сообщения: %v", err)
+			if err := json.Unmarshal(msgBytes, &msg); err != nil {
+				log.Printf("[ClusterHub:Direct] Ошибка десериализации сообщения из канала %s: %v. Сообщение: %s", ch.config.DirectChannel, err, string(msgBytes))
 				continue
 			}
 
-			// Игнорируем сообщения от этого же экземпляра
+			// Игнорируем сообщения от самого себя
 			if msg.InstanceID == ch.config.InstanceID {
 				continue
 			}
 
-			// Передаем сообщение в Hub для доставки пользователю
-			if ch.parent != nil && msg.RecipientID != "" {
-				log.Printf("ClusterHub: получено прямое сообщение от %s для пользователя %s",
-					msg.InstanceID, msg.RecipientID)
-				if sh, ok := ch.parent.(*ShardedHub); ok {
-					sh.SendToUser(msg.RecipientID, []byte(msg.Payload))
-				}
+			// Обрабатываем только прямые сообщения
+			if msg.MessageType == "direct" && msg.RecipientID != "" {
+				log.Printf("[ClusterHub:Direct] Получено прямое сообщение для %s от %s", msg.RecipientID, msg.InstanceID)
+				// Отправляем сообщение локальному пользователю, если он есть
+				// Ошибку не обрабатываем, т.к. SendToUser сам логирует, если получатель не найден локально
+				_ = ch.parent.SendToUser(msg.RecipientID, msg.Payload)
+			} else {
+				log.Printf("[ClusterHub:Direct] Получено сообщение неверного типа или без получателя в канале %s: %+v", ch.config.DirectChannel, msg)
 			}
 		}
 	}
 }
 
-// publishMetrics периодически публикует метрики экземпляра Hub
-func (ch *ClusterHub) publishMetrics() {
-	ticker := time.NewTicker(ch.config.MetricsInterval)
-	defer ticker.Stop()
+// handleMetricsMessages прослушивает канал метрик и обновляет информацию о пирах
+func (ch *ClusterHub) handleMetricsMessages() {
+	defer ch.wg.Done()
+
+	if ch.config.MetricsChannel == "" {
+		log.Println("[ClusterHub:Metrics] Канал метрик не настроен, обработчик не запущен.")
+		return
+	}
+
+	// Используем контекст ch.ctx для подписки
+	msgCh, err := ch.Provider.Subscribe(ch.ctx, ch.config.MetricsChannel)
+	if err != nil {
+		log.Printf("[ClusterHub:Metrics] CRITICAL: Не удалось подписаться на канал метрик %s: %v", ch.config.MetricsChannel, err)
+		// Здесь можно добавить отправку алерта, если parent это поддерживает
+		// Например, через type assertion или отдельный интерфейс
+		// if alerter, ok := ch.parent.(AlertSender); ok {
+		//     alerter.SendAlert(...)
+		// }
+		return
+	}
+	log.Printf("[ClusterHub:Metrics] Успешно подписан на канал метрик: %s", ch.config.MetricsChannel)
 
 	for {
 		select {
 		case <-ch.ctx.Done():
+			log.Println("[ClusterHub:Metrics] Контекст отменен, завершение обработки метрик.")
+			return
+		case msgBytes, ok := <-msgCh:
+			if !ok {
+				log.Println("[ClusterHub:Metrics] Канал метрик закрыт.")
+				return // Выход, если канал закрыт
+			}
+
+			var msg ClusterMessage
+			if err := json.Unmarshal(msgBytes, &msg); err != nil {
+				log.Printf("[ClusterHub:Metrics] Ошибка десериализации сообщения из канала %s: %v. Сообщение: %s", ch.config.MetricsChannel, err, string(msgBytes))
+				continue
+			}
+
+			// Игнорируем сообщения от самого себя
+			if msg.InstanceID == ch.config.InstanceID {
+				continue
+			}
+
+			// Обрабатываем сообщения метрик и удаления пиров
+			switch msg.MessageType {
+			case "metrics":
+				log.Printf("[ClusterHub:Metrics] Получены метрики от %s", msg.InstanceID)
+				// Ошибка здесь не критична для работы обработчика, просто логируем
+				ch.parent.AddClusterPeer(msg.InstanceID, msg.Payload)
+			case "peer_removed":
+				log.Printf("[ClusterHub:Metrics] Получено уведомление об удалении пира %s", msg.InstanceID)
+				// Ошибка здесь не критична для работы обработчика, просто логируем
+				ch.parent.RemoveClusterPeer(msg.InstanceID)
+			default:
+				log.Printf("[ClusterHub:Metrics] Получено сообщение неизвестного типа в канале %s: %+v", ch.config.MetricsChannel, msg)
+			}
+		}
+	}
+}
+
+// publishMetrics периодически публикует метрики этого экземпляра в кластер
+func (ch *ClusterHub) publishMetrics() {
+	if ch.config.MetricsInterval <= 0 {
+		log.Println("ClusterHub: Публикация метрик отключена (интервал <= 0)")
+		return
+	}
+
+	// Преобразуем интервал из конфига (int секунд) в time.Duration
+	interval := time.Duration(ch.config.MetricsInterval) * time.Second
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	log.Printf("ClusterHub: Запуск публикации метрик каждые %v", interval)
+
+	for {
+		select {
+		case <-ch.ctx.Done():
+			// Отправляем сообщение об удалении узла перед выходом
+			ch.sendPeerRemovalMessage()
 			return
 		case <-ticker.C:
-			if ch.metrics == nil {
-				continue
-			}
-
-			// Получаем метрики
-			metrics := ch.metrics.GetBasicMetrics()
-
-			// Добавляем информацию об экземпляре
-			metrics["instance_id"] = ch.config.InstanceID
-			metrics["timestamp"] = time.Now().Format(time.RFC3339)
-
-			// Сериализуем метрики
-			data, err := json.Marshal(metrics)
+			// Получаем метрики от родительского хаба
+			metrics := ch.parent.GetMetrics()
+			payload, err := json.Marshal(metrics)
 			if err != nil {
-				log.Printf("ClusterHub: ошибка сериализации метрик: %v", err)
+				log.Printf("ClusterHub: Ошибка сериализации метрик: %v", err)
 				continue
 			}
 
-			// Создаем сообщение кластера
 			msg := ClusterMessage{
 				MessageType: "metrics",
-				InstanceID:  ch.config.InstanceID,
-				Payload:     data,
+				InstanceID:  ch.parent.GetInstanceID(),
+				Payload:     payload,
 				Timestamp:   time.Now(),
 			}
 
-			// Сериализуем сообщение
-			msgData, err := json.Marshal(msg)
+			data, err := json.Marshal(msg)
 			if err != nil {
-				log.Printf("ClusterHub: ошибка сериализации сообщения с метриками: %v", err)
+				log.Printf("ClusterHub: Ошибка сериализации сообщения с метриками: %v", err)
 				continue
 			}
 
-			// Публикуем метрики
-			if err := ch.config.Provider.Publish(ch.config.MetricsChannel, msgData); err != nil {
-				log.Printf("ClusterHub: ошибка публикации метрик: %v", err)
+			// Публикуем метрики в канал метрик
+			if err := ch.Provider.Publish(ch.config.MetricsChannel, data); err != nil {
+				log.Printf("ClusterHub: Ошибка публикации метрик в %s: %v", ch.config.MetricsChannel, err)
 			}
 		}
 	}
 }
 
-// RedisConfig содержит настройки для подключения к Redis
-type RedisConfig struct {
-	Addresses   []string
-	Password    string
-	DB          int
-	MasterName  string
-	UseCluster  bool
-	UseSentinel bool
-	MaxRetries  int
-}
+// sendPeerRemovalMessage отправляет сообщение об удалении узла из кластера
+func (ch *ClusterHub) sendPeerRemovalMessage() {
+	// Проверяем, что канал метрик настроен
+	if ch.config.MetricsChannel == "" {
+		log.Println("ClusterHub: Невозможно отправить сообщение об удалении узла, канал метрик не настроен.")
+		return
+	}
 
-// =====================================================================
-// РЕАЛИЗАЦИЯ REDIS PUB/SUB
-// =====================================================================
+	log.Printf("ClusterHub: Отправка сообщения об удалении узла %s в канал %s", ch.parent.GetInstanceID(), ch.config.MetricsChannel)
+	msg := ClusterMessage{
+		MessageType: "peer_removed", // Новый тип сообщения
+		InstanceID:  ch.parent.GetInstanceID(),
+		Timestamp:   time.Now(),
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Printf("ClusterHub: Ошибка сериализации сообщения об удалении узла: %v", err)
+		return
+	}
+	// Удаляем неиспользуемый контекст
+	// ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// defer cancel()
+	// Исправляем вызов Publish - он возвращает просто error
+	// Публикуем сообщение об удалении узла в канал метрик
+	if err := ch.Provider.Publish(ch.config.MetricsChannel, data); err != nil {
+		log.Printf("ClusterHub: Ошибка публикации сообщения об удалении узла в %s: %v", ch.config.MetricsChannel, err)
+	}
+}
 
 // RedisPubSub реализует PubSubProvider с использованием Redis
 type RedisPubSub struct {
-	client        *redis.Client
-	config        RedisConfig
+	client redis.UniversalClient // Принимаем готовый клиент
+	// config        RedisConfig // Удаляем локальную копию конфига
 	ctx           context.Context
 	cancel        context.CancelFunc
-	subscriptions sync.Map
-	retryInterval time.Duration
-	maxRetries    int
-	mu            sync.Mutex
+	subscriptions sync.Map   // Хранит активные подписки (channel -> *redis.PubSub)
+	mu            sync.Mutex // Защищает доступ к subscriptions
 }
 
-// NewRedisPubSub создает новый провайдер Redis Pub/Sub
-func NewRedisPubSub(config RedisConfig) (*RedisPubSub, error) {
-	ctx, cancel := context.WithCancel(context.Background())
-
-	log.Printf("RedisPubSub: создание провайдера Redis Pub/Sub")
-
-	var client *redis.Client
-
-	// Создаем клиент Redis в зависимости от настроек
-	if config.UseCluster {
-		// Кластерный режим не поддерживается в этой реализации
-		log.Printf("RedisPubSub: кластерный режим не поддерживается, используйте стандартный режим")
-		cancel()
-		return nil, fmt.Errorf("кластерный режим Redis не поддерживается")
-	} else if config.UseSentinel {
-		// Sentinel режим не поддерживается в этой реализации
-		log.Printf("RedisPubSub: режим Sentinel не поддерживается, используйте стандартный режим")
-		cancel()
-		return nil, fmt.Errorf("режим Sentinel Redis не поддерживается")
-	} else {
-		// Обычный режим
-		addr := ""
-		if len(config.Addresses) > 0 {
-			addr = config.Addresses[0]
-		} else {
-			addr = "localhost:6379"
-		}
-
-		client = redis.NewClient(&redis.Options{
-			Addr:       addr,
-			Password:   config.Password,
-			DB:         config.DB,
-			MaxRetries: config.MaxRetries,
-		})
+// NewRedisPubSub создает новый Redis Pub/Sub провайдер, используя существующий UniversalClient.
+func NewRedisPubSub(client redis.UniversalClient) (*RedisPubSub, error) {
+	if client == nil {
+		return nil, errors.New("redis client cannot be nil for RedisPubSub")
 	}
 
-	// Проверяем подключение
+	// Проверяем соединение клиента перед использованием
+	ctx, cancelCheck := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelCheck()
 	if err := client.Ping(ctx).Err(); err != nil {
-		log.Printf("RedisPubSub: ошибка подключения к Redis: %v", err)
-		cancel()
-		return nil, fmt.Errorf("ошибка подключения к Redis: %w", err)
+		return nil, fmt.Errorf("provided redis client failed ping check: %w", err)
 	}
 
-	log.Printf("RedisPubSub: успешное подключение к Redis")
+	ctxPubSub, cancelPubSub := context.WithCancel(context.Background())
 
-	return &RedisPubSub{
+	rp := &RedisPubSub{
 		client:        client,
-		config:        config,
-		ctx:           ctx,
-		cancel:        cancel,
-		retryInterval: 1 * time.Second,
-		maxRetries:    config.MaxRetries,
-	}, nil
+		ctx:           ctxPubSub,
+		cancel:        cancelPubSub,
+		subscriptions: sync.Map{},
+	}
+
+	log.Println("RedisPubSub provider created using existing client.")
+	return rp, nil
 }
 
 // Publish публикует сообщение в указанный канал
 func (p *RedisPubSub) Publish(channel string, message []byte) error {
-	var err error
-	for attempt := 0; attempt <= p.maxRetries; attempt++ {
-		// Публикуем сообщение
-		err = p.client.Publish(p.ctx, channel, message).Err()
-		if err == nil {
-			return nil
-		}
-
-		// Если ошибка не связана с подключением, прекращаем попытки
-		if !isRedisConnError(err) {
-			return err
-		}
-
-		// Логируем ошибку и делаем повторную попытку
-		log.Printf("RedisPubSub: ошибка публикации в канал %s (попытка %d/%d): %v",
-			channel, attempt+1, p.maxRetries+1, err)
-
-		// Ждем перед следующей попыткой
-		if attempt < p.maxRetries {
-			time.Sleep(p.retryInterval)
-			// Увеличиваем интервал для следующей попытки
-			p.retryInterval = time.Duration(float64(p.retryInterval) * 1.5)
-		}
+	// Используем retry логику, вынесенную в config
+	cmd := p.client.Publish(p.ctx, channel, message)
+	if err := cmd.Err(); err != nil {
+		log.Printf("RedisPubSub: Error publishing to channel '%s': %v", channel, err)
+		return fmt.Errorf("failed to publish to Redis channel %s: %w", channel, err)
 	}
-
-	return fmt.Errorf("не удалось опубликовать сообщение после %d попыток: %w", p.maxRetries+1, err)
+	log.Printf("RedisPubSub: Published message to channel '%s' (Subscribers: %d)", channel, cmd.Val())
+	return nil
 }
 
-// Subscribe подписывается на указанный канал
+// Subscribe подписывается на указанный канал Redis
 func (p *RedisPubSub) Subscribe(ctx context.Context, channel string) (<-chan []byte, error) {
-	log.Printf("RedisPubSub: подписка на канал %s", channel)
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	// Создаем канал для сообщений с буфером
-	msgCh := make(chan []byte, 64)
-
-	// Получаем pubsub для указанного канала
-	pubsub := p.client.Subscribe(p.ctx, channel)
-	if _, err := pubsub.Receive(p.ctx); err != nil {
-		close(msgCh)
-		return nil, fmt.Errorf("ошибка подписки на канал %s: %w", channel, err)
+	if sub, ok := p.subscriptions.Load(channel); ok {
+		log.Printf("RedisPubSub: Already subscribed to channel '%s'", channel)
+		// Возвращаем существующий канал сообщений
+		redisSub, ok := sub.(*redis.PubSub)
+		if ok {
+			// Создаем новый канал-прокси, чтобы не закрыть оригинальный
+			msgChProxy := make(chan []byte, 100)
+			go func() {
+				origCh := redisSub.Channel()
+				for {
+					select {
+					case msg, ok := <-origCh:
+						if !ok {
+							close(msgChProxy)
+							return
+						}
+						// Пересылаем сообщение в прокси-канал
+						select {
+						case msgChProxy <- []byte(msg.Payload):
+						default:
+							log.Printf("RedisPubSub: Proxy channel for '%s' is full. Dropping message.", channel)
+						}
+					case <-ctx.Done(): // Если контекст нового подписчика завершен
+						close(msgChProxy)
+						log.Printf("RedisPubSub: Proxy subscription to '%s' cancelled by context.", channel)
+						return
+					case <-p.ctx.Done(): // Если весь PubSub остановлен
+						close(msgChProxy)
+						return
+					}
+				}
+			}()
+			return msgChProxy, nil
+		}
 	}
 
-	// Сохраняем подписку в карте для возможности закрытия
-	key := fmt.Sprintf("%s:%p", channel, msgCh)
-	p.subscriptions.Store(key, pubsub)
+	log.Printf("RedisPubSub: Subscribing to channel '%s'", channel)
 
-	// Запускаем обработчик сообщений
+	// Создаем новую подписку
+	pubsub := p.client.Subscribe(p.ctx, channel)
+
+	// Ждем подтверждения подписки
+	_, err := pubsub.Receive(p.ctx)
+	if err != nil {
+		pubsub.Close() // Закрываем подписку в случае ошибки
+		log.Printf("RedisPubSub: Error receiving subscription confirmation for channel '%s': %v", channel, err)
+		return nil, fmt.Errorf("failed to subscribe to Redis channel %s: %w", channel, err)
+	}
+
+	p.subscriptions.Store(channel, pubsub)
+	log.Printf("RedisPubSub: Successfully subscribed to channel '%s'", channel)
+
+	msgCh := make(chan []byte, 100) // Буферизированный канал
+
+	// Запускаем горутину для чтения сообщений из Redis и пересылки в канал
 	go func() {
 		defer func() {
-			// Закрываем PubSub и канал сообщений
+			p.mu.Lock()
+			p.subscriptions.Delete(channel)
+			p.mu.Unlock()
 			pubsub.Close()
 			close(msgCh)
-			// Удаляем подписку из карты
-			p.subscriptions.Delete(key)
-			log.Printf("RedisPubSub: подписка на канал %s закрыта", channel)
+			log.Printf("RedisPubSub: Unsubscribed and closed channel '%s'", channel)
 		}()
 
-		redisChannel := pubsub.Channel()
-
+		redisCh := pubsub.Channel()
 		for {
 			select {
-			case <-ctx.Done():
-				return
-			case <-p.ctx.Done():
-				return
-			case msg, ok := <-redisChannel:
+			case msg, ok := <-redisCh:
 				if !ok {
-					// Канал закрыт
-					return
+					log.Printf("RedisPubSub: Redis channel '%s' closed by server.", channel)
+					return // Канал закрыт со стороны Redis
 				}
-
-				// Отправляем сообщение
+				// Пересылаем сообщение подписчику
 				select {
 				case msgCh <- []byte(msg.Payload):
-					// Успешно отправлено
-				default:
-					// Канал заполнен, пропускаем сообщение
-					log.Printf("RedisPubSub: канал сообщений переполнен для %s, пропускаем сообщение", channel)
+				case <-p.ctx.Done():
+					log.Printf("RedisPubSub: Goroutine for channel '%s' stopped by manager context.", channel)
+					return
+				case <-ctx.Done():
+					log.Printf("RedisPubSub: Goroutine for channel '%s' stopped by subscriber context.", channel)
+					return
 				}
+			case <-p.ctx.Done():
+				log.Printf("RedisPubSub: Goroutine for channel '%s' stopped by manager context (outer select).", channel)
+				return
+			case <-ctx.Done():
+				log.Printf("RedisPubSub: Goroutine for channel '%s' stopped by subscriber context (outer select).", channel)
+				return
 			}
 		}
 	}()
@@ -540,49 +615,76 @@ func (p *RedisPubSub) Subscribe(ctx context.Context, channel string) (<-chan []b
 	return msgCh, nil
 }
 
-// Close закрывает все подписки и освобождает ресурсы
+// Close закрывает все соединения Redis и активные подписки
 func (p *RedisPubSub) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	log.Println("RedisPubSub: Closing Redis client and all subscriptions...")
+	// Отменяем контекст, чтобы остановить все горутины подписок
 	p.cancel()
 
-	// Закрываем все подписки
+	var lastErr error
+
+	// Закрываем все активные подписки
 	p.subscriptions.Range(func(key, value interface{}) bool {
-		if pubsub, ok := value.(*redis.PubSub); ok {
-			pubsub.Close()
+		channel := key.(string)
+		pubsub, ok := value.(*redis.PubSub)
+		if ok {
+			if err := pubsub.Close(); err != nil {
+				log.Printf("RedisPubSub: Error closing subscription to channel '%s': %v", channel, err)
+				lastErr = err // Сохраняем последнюю ошибку
+			}
 		}
 		return true
 	})
 
-	// Закрываем клиент Redis
+	// Закрываем основного клиента Redis
 	if p.client != nil {
-		err := p.client.Close()
-		if err != nil {
-			log.Printf("RedisPubSub: ошибка при закрытии клиента Redis: %v", err)
-			return err
+		if err := p.client.Close(); err != nil {
+			log.Printf("RedisPubSub: Error closing Redis client: %v", err)
+			lastErr = err
 		}
 	}
 
-	log.Printf("RedisPubSub: все ресурсы освобождены")
-	return nil
+	log.Println("RedisPubSub: Closed.")
+	return lastErr
 }
 
-// isRedisConnError проверяет, связана ли ошибка с проблемами подключения
+// isRedisConnError проверяет, является ли ошибка ошибкой соединения Redis
+// (Эта функция может потребовать уточнения в зависимости от используемых библиотек)
 func isRedisConnError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// Простые проверки строк. В реальном приложении лучше использовать
+	// более надежные проверки, например, errors.Is с конкретными типами ошибок Redis.
+	strErr := err.Error()
+	return strings.Contains(strErr, "connection refused") ||
+		strings.Contains(strErr, "i/o timeout") ||
+		strings.Contains(strErr, "EOF") ||
+		strings.Contains(strErr, "broken pipe")
+}
 
-	// Проверяем строку ошибки на наличие слов, связанных с подключением
-	errStr := err.Error()
-	connectionErrors := []string{
-		"connection", "timeout", "refused", "reset", "closed",
-		"network", "dial", "connect", "i/o timeout",
+// Вспомогательная функция для выполнения операции с ретраями (заменена на встроенную логику клиента)
+/*
+func (p *RedisPubSub) executeWithRetry(operation func() error) error {
+	// ... (старая логика ретраев)
+}
+*/
+
+// generateInstanceID создает уникальный ID для экземпляра Hub
+func generateInstanceID() string {
+	return "instance_" + time.Now().Format("20060102150405") + "_" + randomString(8)
+}
+
+// randomString генерирует случайную строку указанной длины
+func randomString(length int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	result := make([]byte, length)
+	for i := range result {
+		result[i] = charset[time.Now().UnixNano()%int64(len(charset))]
+		time.Sleep(1 * time.Nanosecond) // Добавляем минимальную задержку для лучшей случайности
 	}
-
-	for _, connErr := range connectionErrors {
-		if strings.Contains(strings.ToLower(errStr), connErr) {
-			return true
-		}
-	}
-
-	return false
+	return string(result)
 }

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -12,57 +13,80 @@ import (
 	"github.com/yourusername/trivia-api/pkg/auth/manager"
 )
 
-// AuthService предоставляет методы для аутентификации пользователей
+// AuthService предоставляет методы для работы с аутентификацией и пользователями
 type AuthService struct {
-	userRepo         repository.UserRepository
-	jwtService       *auth.JWTService
-	tokenService     *auth.TokenService                // Устаревшее поле для обратной совместимости
-	tokenManager     *manager.TokenManager             // Новое поле для работы с токенами
-	refreshTokenRepo repository.RefreshTokenRepository // Добавляем прямой доступ к репозиторию refresh-токенов
+	userRepo   repository.UserRepository
+	jwtService *auth.JWTService // Нужен для ParseToken и Invalidate
+	// tokenService     *auth.TokenService             // УДАЛЕНО
+	tokenManager     *manager.TokenManager             // Теперь основная зависимость для токенов
+	refreshTokenRepo repository.RefreshTokenRepository // Оставляем для прямого доступа, если нужно
+	invalidTokenRepo repository.InvalidTokenRepository // Добавляем репозиторий инвалидных токенов
 }
 
 // NewAuthService создает новый сервис аутентификации
 func NewAuthService(
 	userRepo repository.UserRepository,
 	jwtService *auth.JWTService,
-	tokenService *auth.TokenService,
+	// tokenService *auth.TokenService, // УДАЛЕНО
+	tokenManager *manager.TokenManager, // ПРИНИМАЕМ TokenManager
 	refreshTokenRepo repository.RefreshTokenRepository,
+	invalidTokenRepo repository.InvalidTokenRepository, // ПРИНИМАЕМ InvalidTokenRepo
 ) *AuthService {
-	return &AuthService{
-		userRepo:         userRepo,
-		jwtService:       jwtService,
-		tokenService:     tokenService,
-		refreshTokenRepo: refreshTokenRepo,
+	if userRepo == nil {
+		log.Fatal("UserRepository is required for AuthService")
 	}
-}
+	if jwtService == nil {
+		log.Fatal("JWTService is required for AuthService")
+	}
+	if tokenManager == nil { // ПРОВЕРЯЕМ TokenManager
+		log.Fatal("TokenManager is required for AuthService")
+	}
+	if refreshTokenRepo == nil {
+		log.Fatal("RefreshTokenRepository is required for AuthService")
+	}
+	if invalidTokenRepo == nil {
+		log.Fatal("InvalidTokenRepository is required for AuthService")
+	}
 
-// WithTokenManager устанавливает TokenManager для AuthService
-func (s *AuthService) WithTokenManager(tokenManager *manager.TokenManager) *AuthService {
-	s.tokenManager = tokenManager
-	return s
+	return &AuthService{
+		userRepo:   userRepo,
+		jwtService: jwtService,
+		// tokenService:     tokenService, // УДАЛЕНО
+		tokenManager:     tokenManager, // ИСПОЛЬЗУЕМ TokenManager
+		refreshTokenRepo: refreshTokenRepo,
+		invalidTokenRepo: invalidTokenRepo,
+	}
 }
 
 // RegisterUser регистрирует нового пользователя
 func (s *AuthService) RegisterUser(username, email, password string) (*entity.User, error) {
-	existingUser, _ := s.userRepo.GetByEmail(email)
-	if existingUser != nil {
-		return nil, errors.New("email already registered")
+	// Проверяем, существует ли пользователь с таким email
+	_, err := s.userRepo.GetByEmail(email)
+	if err == nil {
+		return nil, errors.New("user with this email already exists")
+	}
+	if !errors.Is(err, repository.ErrNotFound) && !errors.Is(err, errors.New("user not found")) {
+		return nil, fmt.Errorf("failed to check email existence: %w", err)
 	}
 
-	existingUser, _ = s.userRepo.GetByUsername(username)
-	if existingUser != nil {
-		return nil, errors.New("username already taken")
+	// Проверяем, существует ли пользователь с таким username
+	_, err = s.userRepo.GetByUsername(username)
+	if err == nil {
+		return nil, errors.New("user with this username already exists")
+	}
+	if !errors.Is(err, repository.ErrNotFound) && !errors.Is(err, errors.New("user not found")) {
+		return nil, fmt.Errorf("failed to check username existence: %w", err)
 	}
 
+	// Хеширование пароля убрано отсюда.
+	// Пароль будет автоматически хеширован хуком BeforeSave в entity.User
+	// при вызове userRepo.Create.
 	user := &entity.User{
-		Username:    username,
-		Email:       email,
-		Password:    password, // ✅ Передаем обычный пароль, GORM сам вызовет BeforeSave()
-		GamesPlayed: 0,
-		TotalScore:  0,
+		Username: username,
+		Email:    email,
+		Password: password, // Передаем пароль как есть
 	}
 
-	// ✅ Сохраняем пользователя в БД (GORM вызовет BeforeSave)
 	if err := s.userRepo.Create(user); err != nil {
 		return nil, fmt.Errorf("failed to create user: %w", err)
 	}
@@ -78,128 +102,50 @@ type AuthResponse struct {
 }
 
 // LoginUser аутентифицирует пользователя и возвращает пару токенов
-func (s *AuthService) LoginUser(email, password, deviceID, ipAddress, userAgent string) (*AuthResponse, error) {
-	// Ищем пользователя по email
-	user, err := s.userRepo.GetByEmail(email)
+// Обновлено для использования TokenManager
+func (s *AuthService) LoginUser(email, password, deviceID, ipAddress, userAgent string) (*manager.TokenResponse, error) {
+	user, err := s.AuthenticateUser(email, password)
 	if err != nil {
-		return nil, errors.New("invalid email or password")
+		// Ошибка уже залогирована в AuthenticateUser
+		return nil, err // Возвращаем исходную ошибку (не найдено или неверный пароль)
 	}
 
-	log.Println("Вход пользователя:", user.Email)
-	log.Println("Хеш пароля в БД:", user.Password)
-	log.Println("Введенный пароль:", password)
-
-	// Проверяем пароль
-	if !user.CheckPassword(password) {
-		log.Println("Ошибка аутентификации: неверный пароль для пользователя", user.Email)
-		return nil, errors.New("invalid email or password")
-	}
-
-	// Если доступен TokenManager, используем его
-	if s.tokenManager != nil {
-		// Генерируем пару токенов через TokenManager
-		tokenResp, err := s.tokenManager.GenerateTokenPair(user.ID, deviceID, ipAddress, userAgent)
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate tokens: %w", err)
-		}
-
-		// Получаем refresh токен
-		refreshToken, err := s.GetRefreshTokenByUserID(user.ID)
-		if err != nil {
-			log.Printf("Ошибка получения refresh токена для пользователя %d: %v", user.ID, err)
-			// Продолжаем без refresh токена
-		}
-
-		// Формируем ответ
-		response := &AuthResponse{
-			User:        user,
-			AccessToken: tokenResp.AccessToken,
-		}
-
-		// Добавляем refresh токен если нужно (для обратной совместимости)
-		if refreshToken != nil {
-			response.RefreshToken = refreshToken.Token
-		}
-
-		return response, nil
-	}
-
-	// Для обратной совместимости с TokenService
-	if s.tokenService != nil {
-		// Генерируем пару токенов
-		tokenPair, err := s.tokenService.GenerateTokenPair(user.ID, deviceID, ipAddress, userAgent)
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate tokens: %w", err)
-		}
-
-		return &AuthResponse{
-			User:         user,
-			AccessToken:  tokenPair.AccessToken,
-			RefreshToken: tokenPair.RefreshToken,
-		}, nil
-	}
-
-	// Для обратной совместимости, если tokenService не инициализирован
-	// Генерируем только JWT токен
-	accessToken, err := s.jwtService.GenerateToken(user)
+	// Используем TokenManager для генерации токенов
+	tokenResp, err := s.tokenManager.GenerateTokenPair(user.ID, deviceID, ipAddress, userAgent)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate token: %w", err)
+		log.Printf("[AuthService] Ошибка генерации токенов для пользователя ID=%d: %v", user.ID, err)
+		return nil, fmt.Errorf("ошибка генерации токенов")
 	}
 
-	return &AuthResponse{
-		User:        user,
-		AccessToken: accessToken,
-	}, nil
+	// Сброс инвалидации JWT для пользователя при успешном входе
+	// Создаем контекст для вызова
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.jwtService.ResetInvalidationForUser(ctx, user.ID)
+
+	log.Printf("[AuthService] Пользователь ID=%d (%s) успешно вошел в систему", user.ID, user.Email)
+	return tokenResp, nil
 }
 
-// RefreshTokens обновляет пару токенов по refresh-токену
-func (s *AuthService) RefreshTokens(refreshToken, deviceID, ipAddress, userAgent string) (*AuthResponse, error) {
-	// Если доступен TokenManager, используем его
-	if s.tokenManager != nil {
-		// CSRF токен получаем из заголовка запроса в хэндлере, здесь достаточно пустой строки
-		tokenResp, err := s.tokenManager.RefreshTokens(refreshToken, "", deviceID, ipAddress, userAgent)
-		if err != nil {
-			return nil, err
+// RefreshTokens обновляет пару токенов, используя refresh токен
+// Обновлено для использования TokenManager
+func (s *AuthService) RefreshTokens(refreshToken, csrfToken, deviceID, ipAddress, userAgent string) (*manager.TokenResponse, error) {
+	// Используем TokenManager для обновления токенов
+	tokenResp, err := s.tokenManager.RefreshTokens(refreshToken, csrfToken, deviceID, ipAddress, userAgent)
+	if err != nil {
+		var tokenErr *manager.TokenError
+		if errors.As(err, &tokenErr) {
+			log.Printf("[AuthService] Ошибка обновления токенов: %s - %s", tokenErr.Type, tokenErr.Message)
+			// Можно вернуть специфичную ошибку для API
+			return nil, fmt.Errorf("ошибка обновления токенов: %s", tokenErr.Message)
+		} else {
+			log.Printf("[AuthService] Неизвестная ошибка обновления токенов: %v", err)
+			return nil, fmt.Errorf("внутренняя ошибка сервера")
 		}
-
-		// Получаем данные пользователя
-		user, err := s.userRepo.GetByID(tokenResp.UserID)
-		if err != nil {
-			return nil, errors.New("failed to get user info")
-		}
-
-		return &AuthResponse{
-			User:        user,
-			AccessToken: tokenResp.AccessToken,
-		}, nil
 	}
 
-	// Для обратной совместимости с TokenService
-	if s.tokenService == nil {
-		return nil, errors.New("token service not available")
-	}
-
-	tokenPair, err := s.tokenService.RefreshTokens(refreshToken, deviceID, ipAddress, userAgent)
-	if err != nil {
-		return nil, err
-	}
-
-	// Получаем данные из нового refresh-токена напрямую из репозитория
-	token, err := s.refreshTokenRepo.GetTokenByValue(tokenPair.RefreshToken)
-	if err != nil {
-		return nil, errors.New("failed to get user info")
-	}
-
-	user, err := s.userRepo.GetByID(token.UserID)
-	if err != nil {
-		return nil, errors.New("user not found")
-	}
-
-	return &AuthResponse{
-		User:         user,
-		AccessToken:  tokenPair.AccessToken,
-		RefreshToken: tokenPair.RefreshToken,
-	}, nil
+	log.Printf("[AuthService] Токены успешно обновлены для пользователя ID=%d", tokenResp.UserID)
+	return tokenResp, nil
 }
 
 // GetUserByID возвращает пользователя по ID
@@ -255,119 +201,114 @@ func (s *AuthService) ChangePassword(userID uint, oldPassword, newPassword strin
 	return s.LogoutAllDevices(userID)
 }
 
-// LogoutUser выполняет выход пользователя
-func (s *AuthService) LogoutUser(userID uint, refreshToken string) error {
-	// Если доступен TokenManager, используем его
-	if s.tokenManager != nil {
-		return s.tokenManager.RevokeRefreshToken(refreshToken)
-	}
-
-	// Для обратной совместимости с TokenService
-	if s.tokenService != nil && refreshToken != "" {
-		// Отзываем только конкретный refresh-токен
-		return s.tokenService.RevokeRefreshToken(refreshToken)
-	}
-
-	// Для обратной совместимости, если tokenService не инициализирован
-	// или refresh-токен не предоставлен, инвалидируем все токены
-	return s.jwtService.InvalidateTokensForUser(userID)
-}
-
-// LogoutAllDevices выполняет выход пользователя со всех устройств
-func (s *AuthService) LogoutAllDevices(userID uint) error {
-	// Если доступен TokenManager, используем его
-	if s.tokenManager != nil {
-		return s.tokenManager.RevokeAllUserTokens(userID)
-	}
-
-	// Для обратной совместимости с TokenService
-	if s.tokenService != nil {
-		// Отзываем все refresh-токены пользователя
-		return s.tokenService.RevokeAllUserTokens(userID)
-	}
-
-	// Для обратной совместимости, если tokenService не инициализирован
-	return s.jwtService.InvalidateTokensForUser(userID)
-}
-
-// ResetUserTokenInvalidation сбрасывает все инвалидации токенов для пользователя
-// Используется для решения проблем с аутентификацией старых аккаунтов
-func (s *AuthService) ResetUserTokenInvalidation(userID uint) {
-	log.Printf("DEBUG: Resetting token invalidation for user ID=%d", userID)
-	s.jwtService.ResetInvalidationForUser(userID)
-}
-
-// GetUserActiveSessions возвращает все активные сессии пользователя
-func (s *AuthService) GetUserActiveSessions(userID uint) ([]entity.RefreshToken, error) {
-	// Если доступен TokenManager, используем его
-	if s.tokenManager != nil {
-		// У TokenManager нет прямого метода, используем репозиторий
-		tokensPtr, err := s.refreshTokenRepo.GetActiveTokensForUser(userID)
-		if err != nil {
-			return nil, err
-		}
-
-		// Преобразуем []*entity.RefreshToken в []entity.RefreshToken
-		tokens := make([]entity.RefreshToken, len(tokensPtr))
-		for i, t := range tokensPtr {
-			tokens[i] = *t
-		}
-
-		return tokens, nil
-	}
-
-	if s.tokenService == nil {
-		return []entity.RefreshToken{}, nil
-	}
-
-	return s.tokenService.GetUserActiveTokens(userID)
-}
-
-// TokenInfo содержит информацию о сроке действия токенов
-type TokenInfo struct {
-	AccessTokenExpires  time.Time `json:"access_token_expires"`
-	RefreshTokenExpires time.Time `json:"refresh_token_expires"`
-}
-
-// CheckRefreshToken проверяет валидность refresh-токена без обновления
-func (s *AuthService) CheckRefreshToken(refreshToken string) (bool, error) {
-	// Если доступен TokenManager, используем его
-	if s.tokenManager != nil {
-		// Используем репозиторий напрямую
-		return s.refreshTokenRepo.CheckToken(refreshToken)
-	}
-
-	return s.tokenService.CheckRefreshToken(refreshToken)
-}
-
-// GetTokenInfo возвращает информацию о сроке действия токенов
-func (s *AuthService) GetTokenInfo(refreshToken string) (*TokenInfo, error) {
-	// Если доступен TokenManager, используем его
-	if s.tokenManager != nil {
-		managerInfo, err := s.tokenManager.GetTokenInfo(refreshToken)
-		if err != nil {
-			return nil, err
-		}
-
-		return &TokenInfo{
-			AccessTokenExpires:  managerInfo.AccessTokenExpires,
-			RefreshTokenExpires: managerInfo.RefreshTokenExpires,
-		}, nil
-	}
-
-	info, err := s.tokenService.GetTokenInfo(refreshToken)
+// LogoutUser отзывает указанный refresh токен
+// Обновлено для использования TokenManager
+func (s *AuthService) LogoutUser(refreshToken string) error {
+	// Используем TokenManager для отзыва refresh токена
+	err := s.tokenManager.RevokeRefreshToken(refreshToken)
 	if err != nil {
-		return nil, err
+		log.Printf("[AuthService] Ошибка отзыва refresh токена: %v", err)
+		// Можно не возвращать ошибку клиенту, если токен уже недействителен
+		var tokenErr *manager.TokenError
+		if errors.As(err, &tokenErr) && tokenErr.Type == manager.InvalidRefreshToken {
+			return nil // Токен уже недействителен, считаем логаут успешным
+		}
+		return fmt.Errorf("ошибка при выходе из системы")
 	}
 
-	return &TokenInfo{
-		AccessTokenExpires:  info.AccessTokenExpires,
-		RefreshTokenExpires: info.RefreshTokenExpires,
-	}, nil
+	log.Printf("[AuthService] Refresh токен успешно отозван")
+	return nil
 }
 
-// DebugToken анализирует JWT токен без проверки подписи
-// для диагностических целей
+// LogoutAllDevices отзывает все токены пользователя
+// Обновлено для использования TokenManager и jwtService напрямую
+func (s *AuthService) LogoutAllDevices(userID uint) error {
+	// Используем TokenManager для отзыва всех refresh токенов
+	err := s.tokenManager.RevokeAllUserTokens(userID)
+	if err != nil {
+		log.Printf("[AuthService] Ошибка при отзыве всех refresh токенов пользователя ID=%d: %v", userID, err)
+		// Продолжаем, чтобы попытаться инвалидировать JWT
+	}
+
+	// Дополнительно инвалидируем текущие JWT токены через jwtService
+	// Создаем контекст для вызова
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if jwtErr := s.jwtService.InvalidateTokensForUser(ctx, userID); jwtErr != nil {
+		log.Printf("[AuthService] Ошибка при инвалидации JWT токенов пользователя ID=%d: %v", userID, jwtErr)
+		// Если ошибка была и с refresh токенами, возвращаем ее
+		if err != nil {
+			return fmt.Errorf("ошибка при выходе со всех устройств (refresh)")
+		}
+		return fmt.Errorf("ошибка при выходе со всех устройств (jwt)")
+	}
+
+	log.Printf("[AuthService] Все сессии для пользователя ID=%d завершены", userID)
+	return nil
+}
+
+// ResetUserTokenInvalidation сбрасывает флаг инвалидации для пользователя
+// Использует jwtService и InvalidTokenRepository напрямую
+func (s *AuthService) ResetUserTokenInvalidation(userID uint) {
+	// Создаем контекст для вызова
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Сброс в jwtService (in-memory)
+	s.jwtService.ResetInvalidationForUser(ctx, userID)
+
+	// Удаление записи из БД
+	if err := s.invalidTokenRepo.RemoveInvalidToken(ctx, userID); err != nil {
+		log.Printf("[AuthService] Ошибка при удалении записи инвалидации из БД для пользователя ID=%d: %v", userID, err)
+	}
+	log.Printf("[AuthService] Сброшена инвалидация токенов для пользователя ID=%d", userID)
+}
+
+// GetUserActiveSessions возвращает активные сессии пользователя
+// Обновлено для использования TokenManager
+func (s *AuthService) GetUserActiveSessions(userID uint) ([]entity.RefreshToken, error) {
+	sessions, err := s.tokenManager.GetUserActiveSessions(userID)
+	if err != nil {
+		log.Printf("[AuthService] Ошибка получения активных сессий для пользователя ID=%d: %v", userID, err)
+		return nil, fmt.Errorf("не удалось получить список сессий")
+	}
+	return sessions, nil
+}
+
+// CheckRefreshToken проверяет действительность refresh токена
+// Обновлено: Логика проверки теперь полностью в TokenManager, этот метод можно удалить или сделать прокси
+func (s *AuthService) CheckRefreshToken(refreshToken string) (bool, error) {
+	// Проксируем вызов к TokenManager
+	// return s.tokenManager.CheckRefreshToken(refreshToken) // У TokenManager нет такого публичного метода
+	// Вместо этого можно использовать GetTokenInfo или RefreshTokens с проверкой ошибки
+	_, err := s.tokenManager.GetTokenInfo(refreshToken)
+	if err != nil {
+		var tokenErr *manager.TokenError
+		if errors.As(err, &tokenErr) && (tokenErr.Type == manager.InvalidRefreshToken || tokenErr.Type == manager.ExpiredRefreshToken) {
+			return false, nil // Токен недействителен или истек
+		}
+		return false, err // Другая ошибка
+	}
+	return true, nil // Токен действителен
+}
+
+// GetTokenInfo возвращает информацию о сроках действия токенов
+// Обновлено для использования TokenManager
+func (s *AuthService) GetTokenInfo(refreshToken string) (*manager.TokenInfo, error) {
+	info, err := s.tokenManager.GetTokenInfo(refreshToken)
+	if err != nil {
+		log.Printf("[AuthService] Ошибка получения информации о токене: %v", err)
+		var tokenErr *manager.TokenError
+		if errors.As(err, &tokenErr) {
+			return nil, fmt.Errorf("ошибка получения информации: %s", tokenErr.Message)
+		}
+		return nil, fmt.Errorf("внутренняя ошибка сервера")
+	}
+	return info, nil
+}
+
+// DebugToken декодирует токен для отладки
+// Использует jwtService напрямую
 func (s *AuthService) DebugToken(tokenString string) map[string]interface{} {
 	return s.jwtService.DebugToken(tokenString)
 }
@@ -457,26 +398,31 @@ func (s *AuthService) GetRefreshTokenByID(tokenID uint) (*entity.RefreshToken, e
 	return s.refreshTokenRepo.GetTokenByID(tokenID)
 }
 
-// RevokeSessionByID отзывает сессию по её ID с указанием причины
+// RevokeSessionByID отзывает конкретную сессию по ее ID
+// Обновлено для использования TokenManager
 func (s *AuthService) RevokeSessionByID(sessionID uint, reason string) error {
-	// Получаем сессию по ID
+	// Получаем токен по ID, чтобы убедиться, что он существует
 	token, err := s.refreshTokenRepo.GetTokenByID(sessionID)
 	if err != nil {
-		return fmt.Errorf("не удалось найти сессию: %w", err)
+		log.Printf("[AuthService] Ошибка получения сессии ID=%d для отзыва: %v", sessionID, err)
+		return fmt.Errorf("ошибка получения сессии")
+	}
+	if token == nil {
+		return fmt.Errorf("сессия с ID %d не найдена", sessionID)
 	}
 
-	// Устанавливаем время отзыва и причину
-	now := time.Now()
-	token.RevokedAt = &now
-	token.Reason = reason
-	token.IsExpired = true
-
-	// Сохраняем изменения через метод MarkTokenAsExpiredByID
-	err = s.refreshTokenRepo.MarkTokenAsExpiredByID(sessionID)
+	// Используем TokenManager для отзыва
+	err = s.tokenManager.RevokeRefreshToken(token.Token) // TokenManager отзывает по значению токена
 	if err != nil {
-		return fmt.Errorf("не удалось отозвать сессию: %w", err)
+		log.Printf("[AuthService] Ошибка отзыва сессии ID=%d через TokenManager: %v", sessionID, err)
+		// Попытаемся пометить как истекший напрямую через репозиторий с причиной
+		if repoErr := s.refreshTokenRepo.MarkTokenAsExpiredByID(sessionID); repoErr != nil {
+			log.Printf("[AuthService] Ошибка прямой маркировки сессии ID=%d как истекшей: %v", sessionID, repoErr)
+			return fmt.Errorf("ошибка отзыва сессии")
+		}
 	}
 
+	log.Printf("[AuthService] Сессия ID=%d успешно отозвана. Причина: %s", sessionID, reason)
 	return nil
 }
 
@@ -505,41 +451,41 @@ func (s *AuthService) RevokeAllUserSessions(userID uint, reason string) error {
 	return nil
 }
 
-// GetActiveSessionsWithDetails возвращает детализированную информацию о сессиях пользователя
+// GetActiveSessionsWithDetails возвращает детализированную информацию об активных сессиях пользователя
+// Обновлено для использования TokenManager
 func (s *AuthService) GetActiveSessionsWithDetails(userID uint) ([]map[string]interface{}, error) {
-	tokens, err := s.refreshTokenRepo.GetActiveTokensForUser(userID)
+	sessions, err := s.tokenManager.GetUserActiveSessions(userID)
 	if err != nil {
-		return nil, fmt.Errorf("не удалось получить активные сессии: %w", err)
+		log.Printf("[AuthService] Ошибка получения активных сессий (детали) для пользователя ID=%d: %v", userID, err)
+		return nil, fmt.Errorf("не удалось получить список сессий")
 	}
 
-	result := make([]map[string]interface{}, 0, len(tokens))
-	for _, token := range tokens {
-		// Создаем детализированную информацию о сессии
-		sessionInfo := map[string]interface{}{
-			"id":         token.ID,
-			"device_id":  token.DeviceID,
-			"ip_address": token.IPAddress,
-			"user_agent": token.UserAgent,
-			"created_at": token.CreatedAt,
-			"expires_at": token.ExpiresAt,
-			"is_expired": token.IsExpired,
-			"last_used":  token.CreatedAt, // По умолчанию время создания
-		}
-
-		// Добавляем информацию об отзыве, если сессия отозвана
-		if token.RevokedAt != nil {
-			sessionInfo["revoked_at"] = token.RevokedAt
-			sessionInfo["reason"] = token.Reason
-		}
-
-		result = append(result, sessionInfo)
+	var sessionDetails []map[string]interface{}
+	for _, session := range sessions {
+		// Используем метод SessionInfo() из entity.RefreshToken
+		details := session.SessionInfo()
+		sessionDetails = append(sessionDetails, details)
 	}
 
-	return result, nil
+	return sessionDetails, nil
 }
 
-// GenerateWsTicket генерирует краткоживущий токен для WebSocket подключения
+// GenerateWsTicket генерирует короткоживущий тикет для аутентификации WebSocket
+// Использует jwtService напрямую
 func (s *AuthService) GenerateWsTicket(userID uint, email string) (string, error) {
-	// Используем JWTService для генерации WS-тикета
-	return s.jwtService.GenerateWSTicket(userID, email)
+	ticket, err := s.jwtService.GenerateWSTicket(userID, email)
+	if err != nil {
+		log.Printf("[AuthService] Ошибка генерации WebSocket тикета для пользователя ID=%d: %v", userID, err)
+		return "", fmt.Errorf("ошибка генерации тикета")
+	}
+	return ticket, nil
+}
+
+// InvalidateUserTokens выполняет инвалидацию JWT токенов для пользователя
+// Это публичный метод, чтобы его можно было вызвать из handler
+func (s *AuthService) InvalidateUserTokens(userID uint) error {
+	// Создаем контекст для вызова
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return s.jwtService.InvalidateTokensForUser(ctx, userID)
 }

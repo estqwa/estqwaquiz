@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -11,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/yourusername/trivia-api/internal/domain/entity"
 	"github.com/yourusername/trivia-api/internal/domain/repository"
 	"github.com/yourusername/trivia-api/pkg/auth"
@@ -31,17 +31,38 @@ const (
 	AccessTokenCookie = "access_token"
 	// Имя заголовка для CSRF токена
 	CSRFHeader = "X-CSRF-Token"
+
+	// Время жизни CSRF токена в памяти
+	csrfTokenLifetime = 15 * time.Minute
+
+	// Время жизни ключа JWT по умолчанию
+	DefaultJWTKeyLifetime = 90 * 24 * time.Hour // 90 дней
 )
 
 // TokenErrorType определяет тип ошибки токена
 type TokenErrorType string
 
 const (
-	TokenErrorExpired      TokenErrorType = "token_expired"
-	TokenErrorInvalid      TokenErrorType = "token_invalid"
-	TokenErrorMalformed    TokenErrorType = "token_malformed"
-	TokenErrorUnauthorized TokenErrorType = "unauthorized"
-	TokenErrorCSRFMismatch TokenErrorType = "csrf_mismatch"
+	// Ошибки генерации токенов
+	TokenGenerationFailed TokenErrorType = "TOKEN_GENERATION_FAILED"
+
+	// Ошибки валидации
+	InvalidRefreshToken TokenErrorType = "INVALID_REFRESH_TOKEN"
+	ExpiredRefreshToken TokenErrorType = "EXPIRED_REFRESH_TOKEN"
+	InvalidAccessToken  TokenErrorType = "INVALID_ACCESS_TOKEN"
+	ExpiredAccessToken  TokenErrorType = "EXPIRED_ACCESS_TOKEN"
+	InvalidCSRFToken    TokenErrorType = "INVALID_CSRF_TOKEN"
+	UserNotFound        TokenErrorType = "USER_NOT_FOUND"
+	InactiveUser        TokenErrorType = "INACTIVE_USER"
+
+	// Ошибки базы данных или репозитория
+	DatabaseError TokenErrorType = "DATABASE_ERROR"
+
+	// Прочие ошибки
+	TokenRevoked     TokenErrorType = "TOKEN_REVOKED"
+	TooManySessions  TokenErrorType = "TOO_MANY_SESSIONS"
+	KeyRotationError TokenErrorType = "KEY_ROTATION_ERROR"
+	KeyNotFoundError TokenErrorType = "KEY_NOT_FOUND"
 )
 
 // TokenError представляет ошибку при работе с токенами
@@ -103,7 +124,6 @@ type JWTKeyRotation struct {
 // TokenManager управляет выдачей и валидацией токенов
 type TokenManager struct {
 	jwtService              *auth.JWTService
-	tokenService            *auth.TokenService
 	refreshTokenRepo        repository.RefreshTokenRepository
 	userRepo                repository.UserRepository
 	csrfTokens              map[string]CSRFToken
@@ -121,154 +141,198 @@ type TokenManager struct {
 // NewTokenManager создает новый менеджер токенов
 func NewTokenManager(
 	jwtService *auth.JWTService,
-	tokenService *auth.TokenService,
 	refreshTokenRepo repository.RefreshTokenRepository,
 	userRepo repository.UserRepository,
 ) *TokenManager {
-	// Определяем режим работы по Gin. В production режиме gin.Mode() == gin.ReleaseMode
-	isProductionMode := gin.Mode() == gin.ReleaseMode
-	log.Printf("[TokenManager] Инициализация в режиме: %s (production mode: %v)", gin.Mode(), isProductionMode)
+	if jwtService == nil {
+		log.Fatal("JWTService is required for TokenManager")
+	}
+	if refreshTokenRepo == nil {
+		log.Fatal("RefreshTokenRepository is required for TokenManager")
+	}
+	if userRepo == nil {
+		log.Fatal("UserRepository is required for TokenManager")
+	}
 
-	return &TokenManager{
+	// Устанавливаем значения по умолчанию, если они не были заданы
+	accessTokenExpiry := 30 * time.Minute     // Можно вынести в конфигурацию
+	refreshTokenExpiry := 30 * 24 * time.Hour // Можно вынести в конфигурацию
+	maxRefreshTokens := 10                    // Можно вынести в конфигурацию
+
+	tm := &TokenManager{
 		jwtService:              jwtService,
-		tokenService:            tokenService,
 		refreshTokenRepo:        refreshTokenRepo,
 		userRepo:                userRepo,
 		csrfTokens:              make(map[string]CSRFToken),
 		jwtKeys:                 make([]JWTKeyRotation, 0),
-		accessTokenExpiry:       AccessTokenLifetime,
-		refreshTokenExpiry:      RefreshTokenLifetime,
-		maxRefreshTokensPerUser: DefaultMaxRefreshTokensPerUser,
-		lastKeyRotation:         time.Now(),
-		isProductionMode:        isProductionMode,
+		accessTokenExpiry:       accessTokenExpiry,
+		refreshTokenExpiry:      refreshTokenExpiry,
+		maxRefreshTokensPerUser: maxRefreshTokens,
+		isProductionMode:        true, // По умолчанию считаем production
+	}
+
+	// Запускаем фоновую задачу очистки CSRF токенов
+	go tm.cleanupExpiredCSRFTokensLoop()
+	// Запускаем фоновую задачу ротации JWT ключей (если необходимо)
+	// go tm.jwtKeyRotationLoop() // Раскомментировать, если нужна автоматическая ротация
+
+	// Инициализация JWT ключей при старте
+	if err := tm.InitializeJWTKeys(); err != nil {
+		log.Printf("Warning: Failed to initialize JWT keys: %v. Using default secret.", err)
+		// Продолжаем работу с секретом из jwtService по умолчанию
+	}
+
+	return tm
+}
+
+// SetAccessTokenExpiry устанавливает время жизни access токена
+func (m *TokenManager) SetAccessTokenExpiry(duration time.Duration) {
+	if duration > 0 {
+		m.accessTokenExpiry = duration
+		log.Printf("[TokenManager] Access token expiry set to: %v", duration)
+	} else {
+		log.Printf("[TokenManager] Warning: Invalid access token expiry duration provided: %v. Using default: %v", duration, m.accessTokenExpiry)
 	}
 }
 
-// GenerateTokenPair создает новую пару токенов для пользователя
+// SetRefreshTokenExpiry устанавливает время жизни refresh токена
+func (m *TokenManager) SetRefreshTokenExpiry(duration time.Duration) {
+	if duration > 0 {
+		m.refreshTokenExpiry = duration
+		log.Printf("[TokenManager] Refresh token expiry set to: %v", duration)
+	} else {
+		log.Printf("[TokenManager] Warning: Invalid refresh token expiry duration provided: %v. Using default: %v", duration, m.refreshTokenExpiry)
+	}
+}
+
+// SetProductionMode устанавливает флаг режима production для Secure cookies
+func (m *TokenManager) SetProductionMode(isProduction bool) {
+	m.isProductionMode = isProduction
+	log.Printf("[TokenManager] Production mode set to: %v", isProduction)
+}
+
+// GenerateTokenPair создает новую пару токенов (access и refresh)
+// Эта функция теперь использует jwtService напрямую, а не через tokenService
 func (m *TokenManager) GenerateTokenPair(userID uint, deviceID, ipAddress, userAgent string) (*TokenResponse, error) {
-	// Получаем пользователя из БД
 	user, err := m.userRepo.GetByID(userID)
 	if err != nil {
 		log.Printf("[TokenManager] Ошибка при получении пользователя ID=%d: %v", userID, err)
-		return nil, NewTokenError(TokenErrorUnauthorized, "Пользователь не найден", err)
+		return nil, NewTokenError(UserNotFound, "пользователь не найден", err)
 	}
 
-	// Генерируем access-токен
-	accessToken, err := m.jwtService.GenerateToken(user)
+	// Генерируем access-токен с использованием текущего активного ключа
+	currentKeyID, _, keyErr := m.GetCurrentJWTKey()
+	if keyErr != nil {
+		log.Printf("[TokenManager] Ошибка получения текущего JWT ключа: %v. Используем дефолтный.", keyErr)
+		// Если ключи не настроены, используем секрет из jwtService
+	}
+
+	// Генерируем access-токен через jwtService (он сам обработает ключи, если они есть)
+	accessToken, err := m.jwtService.GenerateToken(user) // jwtService использует свой секрет по умолчанию или переданные ключи
 	if err != nil {
-		log.Printf("[TokenManager] Ошибка генерации access-токена: %v", err)
-		return nil, NewTokenError(TokenErrorUnauthorized, "Ошибка генерации токена", err)
+		log.Printf("[TokenManager] Ошибка генерации access-токена для пользователя ID=%d: %v", userID, err)
+		return nil, NewTokenError(TokenGenerationFailed, "ошибка генерации access токена", err)
 	}
 
 	// Генерируем refresh-токен
 	_, err = m.generateRefreshToken(userID, deviceID, ipAddress, userAgent)
 	if err != nil {
-		log.Printf("[TokenManager] Ошибка генерации refresh-токена: %v", err)
-		return nil, NewTokenError(TokenErrorUnauthorized, "Ошибка генерации refresh-токена", err)
+		log.Printf("[TokenManager] Ошибка генерации refresh-токена для пользователя ID=%d: %v", userID, err)
+		return nil, NewTokenError(TokenGenerationFailed, "ошибка генерации refresh токена", err)
 	}
 
-	// Лимитируем количество refresh-токенов для пользователя
-	count, err := m.refreshTokenRepo.CountTokensForUser(userID)
+	// Лимитируем количество активных refresh-токенов
+	err = m.limitUserSessions(userID)
 	if err != nil {
-		log.Printf("[TokenManager] Ошибка при подсчете refresh-токенов: %v", err)
-		// Не возвращаем ошибку, продолжаем
-	} else if count > m.maxRefreshTokensPerUser {
-		// Помечаем лишние токены как истекшие, оставляя только maxRefreshTokensPerUser
-		if err := m.refreshTokenRepo.MarkOldestAsExpiredForUser(userID, m.maxRefreshTokensPerUser); err != nil {
-			log.Printf("[TokenManager] Ошибка при лимитировании refresh-токенов: %v", err)
-			// Не возвращаем ошибку, продолжаем
-		}
+		// Логируем ошибку, но не прерываем процесс выдачи токенов
+		log.Printf("[TokenManager] Ошибка при лимитировании сессий пользователя ID=%d: %v", userID, err)
 	}
 
-	// Генерируем CSRF токен для защиты от CSRF атак
+	// Генерируем CSRF токен
 	csrfToken := m.generateCSRFToken(userID)
 
-	log.Printf("[TokenManager] Сгенерирована пара токенов для пользователя ID=%d", userID)
+	log.Printf("[TokenManager] Сгенерирована пара токенов для пользователя ID=%d, JWT Key ID: %s", userID, currentKeyID)
+
 	return &TokenResponse{
 		AccessToken: accessToken,
 		TokenType:   "Bearer",
 		ExpiresIn:   int(m.accessTokenExpiry.Seconds()),
 		CSRFToken:   csrfToken,
 		UserID:      userID,
+		// RefreshToken больше не возвращается в ответе, используется кука
 	}, nil
 }
 
-// RefreshTokens обновляет пару токенов по refresh-токену
+// RefreshTokens обновляет пару токенов, используя refresh токен
+// Эта функция теперь использует jwtService напрямую
 func (m *TokenManager) RefreshTokens(refreshToken, csrfToken, deviceID, ipAddress, userAgent string) (*TokenResponse, error) {
-	// Находим refresh-токен в БД
-	token, err := m.refreshTokenRepo.GetTokenByValue(refreshToken)
+	// Валидируем refresh токен
+	tokenEntity, err := m.refreshTokenRepo.GetTokenByValue(refreshToken)
 	if err != nil {
-		if err == repository.ErrExpiredToken {
-			log.Printf("[TokenManager] Refresh-токен помечен как истекший")
-			return nil, NewTokenError(TokenErrorExpired, "Недействительный refresh-токен", err)
-		}
-		if err == repository.ErrNotFound {
-			log.Printf("[TokenManager] Refresh-токен не найден")
-			return nil, NewTokenError(TokenErrorInvalid, "Недействительный refresh-токен", err)
+		if errors.Is(err, repository.ErrNotFound) || errors.Is(err, repository.ErrExpiredToken) {
+			return nil, NewTokenError(InvalidRefreshToken, "недействительный или истекший refresh токен", err)
 		}
 		log.Printf("[TokenManager] Ошибка при получении refresh-токена: %v", err)
-		return nil, NewTokenError(TokenErrorUnauthorized, "Ошибка при проверке токена", err)
+		return nil, NewTokenError(DatabaseError, "ошибка при проверке refresh токена", err)
 	}
 
-	// Проверяем CSRF токен
-	if !m.validateCSRFToken(token.UserID, csrfToken) {
-		log.Printf("[TokenManager] Неверный CSRF токен для пользователя ID=%d", token.UserID)
-		return nil, NewTokenError(TokenErrorCSRFMismatch, "Неверный CSRF токен", nil)
+	// Проверяем срок действия
+	if tokenEntity.ExpiresAt.Before(time.Now()) {
+		// Помечаем как истекший на всякий случай
+		m.refreshTokenRepo.MarkTokenAsExpired(refreshToken) // Игнорируем ошибку здесь
+		return nil, NewTokenError(ExpiredRefreshToken, "refresh токен истек", nil)
 	}
 
-	// Проверяем, не истек ли токен
-	if token.ExpiresAt.Before(time.Now()) {
-		log.Printf("[TokenManager] Refresh-токен истек для пользователя ID=%d", token.UserID)
-		// Помечаем истекший токен
-		if err := m.refreshTokenRepo.MarkTokenAsExpired(refreshToken); err != nil {
-			log.Printf("[TokenManager] Ошибка при маркировке истекшего refresh-токена: %v", err)
-		}
-		return nil, NewTokenError(TokenErrorExpired, "Refresh-токен истек", nil)
-	}
-
-	// Проверяем метаданные устройства для предотвращения кражи токена
-	if deviceID != "" && deviceID != token.DeviceID {
-		log.Printf("[TokenManager] Несоответствие deviceID: ожидалось %s, получено %s", token.DeviceID, deviceID)
-		return nil, NewTokenError(TokenErrorUnauthorized, "Несоответствие идентификатора устройства", nil)
+	// Валидируем CSRF токен
+	if !m.validateCSRFToken(tokenEntity.UserID, csrfToken) {
+		return nil, NewTokenError(InvalidCSRFToken, "недействительный CSRF токен", nil)
 	}
 
 	// Получаем пользователя
-	user, err := m.userRepo.GetByID(token.UserID)
+	user, err := m.userRepo.GetByID(tokenEntity.UserID)
 	if err != nil {
-		log.Printf("[TokenManager] Ошибка при получении пользователя ID=%d: %v", token.UserID, err)
-		return nil, NewTokenError(TokenErrorUnauthorized, "Пользователь не найден", err)
+		log.Printf("[TokenManager] Ошибка при получении пользователя ID=%d для обновления токенов: %v", tokenEntity.UserID, err)
+		return nil, NewTokenError(UserNotFound, "пользователь не найден", err)
 	}
 
-	// Помечаем использованный refresh-токен как истекший
+	// Помечаем старый refresh токен как истекший
 	if err := m.refreshTokenRepo.MarkTokenAsExpired(refreshToken); err != nil {
-		log.Printf("[TokenManager] Ошибка при маркировке использованного refresh-токена: %v", err)
-		// Не возвращаем ошибку, продолжаем
+		log.Printf("[TokenManager] Ошибка при маркировке старого refresh-токена как истекшего (ID: %d): %v", tokenEntity.ID, err)
+		// Не критично, продолжаем
 	}
 
-	// Генерируем новые токены
+	// Генерируем новый access токен через jwtService
 	newAccessToken, err := m.jwtService.GenerateToken(user)
 	if err != nil {
-		log.Printf("[TokenManager] Ошибка генерации нового access-токена: %v", err)
-		return nil, NewTokenError(TokenErrorUnauthorized, "Ошибка генерации токена", err)
+		log.Printf("[TokenManager] Ошибка генерации нового access-токена для пользователя ID=%d: %v", user.ID, err)
+		return nil, NewTokenError(TokenGenerationFailed, "ошибка генерации нового access токена", err)
 	}
 
-	// "Скользящее окно" - продлеваем срок действия refresh-токена
+	// Генерируем новый refresh токен
 	_, err = m.generateRefreshToken(user.ID, deviceID, ipAddress, userAgent)
 	if err != nil {
-		log.Printf("[TokenManager] Ошибка генерации нового refresh-токена: %v", err)
-		return nil, NewTokenError(TokenErrorUnauthorized, "Ошибка генерации refresh-токена", err)
+		log.Printf("[TokenManager] Ошибка генерации нового refresh-токена для пользователя ID=%d: %v", user.ID, err)
+		return nil, NewTokenError(TokenGenerationFailed, "ошибка генерации нового refresh токена", err)
+	}
+
+	// Лимитируем сессии снова
+	err = m.limitUserSessions(user.ID)
+	if err != nil {
+		log.Printf("[TokenManager] Ошибка при лимитировании сессий пользователя ID=%d после обновления: %v", user.ID, err)
 	}
 
 	// Генерируем новый CSRF токен
-	newCsrfToken := m.generateCSRFToken(user.ID)
+	newCSRFToken := m.generateCSRFToken(user.ID)
 
 	log.Printf("[TokenManager] Обновлена пара токенов для пользователя ID=%d", user.ID)
+
 	return &TokenResponse{
 		AccessToken: newAccessToken,
 		TokenType:   "Bearer",
 		ExpiresIn:   int(m.accessTokenExpiry.Seconds()),
-		CSRFToken:   newCsrfToken,
+		CSRFToken:   newCSRFToken,
 		UserID:      user.ID,
+		// RefreshToken больше не возвращается в ответе, используется кука
 	}, nil
 }
 
@@ -277,7 +341,7 @@ func (m *TokenManager) GetTokenInfo(refreshToken string) (*TokenInfo, error) {
 	// Находим refresh-токен в БД
 	token, err := m.refreshTokenRepo.GetTokenByValue(refreshToken)
 	if err != nil {
-		return nil, NewTokenError(TokenErrorInvalid, "Недействительный refresh-токен", err)
+		return nil, NewTokenError(InvalidRefreshToken, "Недействительный refresh-токен", err)
 	}
 
 	// Вычисляем время истечения access-токена (примерно)
@@ -292,12 +356,16 @@ func (m *TokenManager) GetTokenInfo(refreshToken string) (*TokenInfo, error) {
 	}, nil
 }
 
-// RevokeRefreshToken отзывает определенный refresh-токен
+// RevokeRefreshToken отзывает (помечает как истекший) указанный refresh токен
 func (m *TokenManager) RevokeRefreshToken(refreshToken string) error {
-	// Помечаем токен как истекший вместо удаления
 	if err := m.refreshTokenRepo.MarkTokenAsExpired(refreshToken); err != nil {
+		// Проверяем, была ли ошибка "не найдено"
+		if errors.Is(err, repository.ErrNotFound) {
+			log.Printf("[TokenManager] Попытка отозвать несуществующий refresh токен.")
+			return NewTokenError(InvalidRefreshToken, "токен не найден", err) // Возвращаем ошибку недействительного токена
+		}
 		log.Printf("[TokenManager] Ошибка при отзыве refresh-токена: %v", err)
-		return NewTokenError(TokenErrorUnauthorized, "Ошибка отзыва токена", err)
+		return NewTokenError(DatabaseError, "ошибка при отзыве токена", err)
 	}
 
 	log.Printf("[TokenManager] Отозван refresh-токен")
@@ -309,13 +377,17 @@ func (m *TokenManager) RevokeAllUserTokens(userID uint) error {
 	// Помечаем все refresh-токены пользователя как истекшие
 	if err := m.refreshTokenRepo.MarkAllAsExpiredForUser(userID); err != nil {
 		log.Printf("[TokenManager] Ошибка при отзыве всех refresh-токенов пользователя ID=%d: %v", userID, err)
-		return NewTokenError(TokenErrorUnauthorized, "Ошибка отзыва токенов", err)
+		// Даже если произошла ошибка с refresh токенами, пытаемся инвалидировать JWT
+		if jwtErr := m.jwtService.InvalidateTokensForUser(context.Background(), userID); jwtErr != nil {
+			log.Printf("[TokenManager] Дополнительная ошибка при инвалидации JWT токенов пользователя ID=%d: %v", userID, jwtErr)
+		}
+		return NewTokenError(DatabaseError, "ошибка отзыва refresh токенов", err)
 	}
 
-	// Для обратной совместимости также инвалидируем JWT-токены
-	if err := m.jwtService.InvalidateTokensForUser(userID); err != nil {
-		log.Printf("[TokenManager] Ошибка при инвалидации JWT-токенов пользователя ID=%d: %v", userID, err)
-		// Не возвращаем ошибку, продолжаем (у нас уже отозваны refresh-токены)
+	// Дополнительно инвалидируем JWT после успешного отзыва refresh токенов
+	if jwtErr := m.jwtService.InvalidateTokensForUser(context.Background(), userID); jwtErr != nil {
+		log.Printf("[TokenManager] Ошибка при инвалидации JWT токенов пользователя ID=%d после отзыва refresh токенов: %v", userID, jwtErr)
+		// Не возвращаем ошибку JWT как критическую, так как refresh уже отозваны
 	}
 
 	// Удаляем все CSRF токены пользователя
@@ -333,12 +405,12 @@ func (m *TokenManager) RevokeAllUserTokens(userID uint) error {
 	return nil
 }
 
-// GetUserActiveSessions возвращает все активные refresh-токены пользователя
+// GetUserActiveSessions возвращает список активных сессий (refresh токенов) для пользователя
 func (m *TokenManager) GetUserActiveSessions(userID uint) ([]entity.RefreshToken, error) {
 	tokensPtr, err := m.refreshTokenRepo.GetActiveTokensForUser(userID)
 	if err != nil {
-		log.Printf("[TokenManager] Ошибка при получении активных токенов пользователя ID=%d: %v", userID, err)
-		return nil, NewTokenError(TokenErrorUnauthorized, "Ошибка при получении списка сессий", err)
+		log.Printf("[TokenManager] Ошибка при получении активных сессий пользователя ID=%d: %v", userID, err)
+		return nil, NewTokenError(DatabaseError, "ошибка получения сессий", err)
 	}
 
 	// Преобразуем []*entity.RefreshToken в []entity.RefreshToken
@@ -381,10 +453,10 @@ func (m *TokenManager) SetAccessTokenCookie(w http.ResponseWriter, accessToken s
 func (m *TokenManager) GetRefreshTokenFromCookie(r *http.Request) (string, error) {
 	cookie, err := r.Cookie(RefreshTokenCookie)
 	if err != nil {
-		if err == http.ErrNoCookie {
-			return "", NewTokenError(TokenErrorUnauthorized, "Refresh токен отсутствует", err)
+		if errors.Is(err, http.ErrNoCookie) {
+			return "", NewTokenError(InvalidRefreshToken, "кука refresh_token не найдена", err)
 		}
-		return "", NewTokenError(TokenErrorUnauthorized, "Ошибка при получении refresh токена", err)
+		return "", NewTokenError(InvalidRefreshToken, "ошибка чтения куки refresh_token", err)
 	}
 	return cookie.Value, nil
 }
@@ -393,10 +465,10 @@ func (m *TokenManager) GetRefreshTokenFromCookie(r *http.Request) (string, error
 func (m *TokenManager) GetAccessTokenFromCookie(r *http.Request) (string, error) {
 	cookie, err := r.Cookie(AccessTokenCookie)
 	if err != nil {
-		if err == http.ErrNoCookie {
-			return "", NewTokenError(TokenErrorUnauthorized, "Access токен отсутствует", err)
+		if errors.Is(err, http.ErrNoCookie) {
+			return "", NewTokenError(InvalidAccessToken, "кука access_token не найдена", err)
 		}
-		return "", NewTokenError(TokenErrorUnauthorized, "Ошибка при получении access токена", err)
+		return "", NewTokenError(InvalidAccessToken, "ошибка чтения куки access_token", err)
 	}
 	return cookie.Value, nil
 }
@@ -438,14 +510,21 @@ func (m *TokenManager) CleanupExpiredTokens() error {
 	count, err := m.refreshTokenRepo.CleanupExpiredTokens()
 	if err != nil {
 		log.Printf("[TokenManager] Ошибка при очистке истекших refresh-токенов: %v", err)
-		return err
+		// Очистка JWT инвалидаций
+		if jwtErr := m.jwtService.CleanupInvalidatedUsers(context.Background()); jwtErr != nil {
+			log.Printf("[TokenManager] Дополнительная ошибка при очистке инвалидированных JWT токенов: %v", jwtErr)
+		}
+		return NewTokenError(DatabaseError, "ошибка очистки истекших токенов", err)
 	}
 
 	// Очищаем истекшие CSRF токены
 	m.cleanupExpiredCSRFTokens()
 
 	// Для обратной совместимости также запускаем очистку инвалидированных JWT-токенов
-	m.jwtService.CleanupInvalidatedUsers()
+	if err := m.jwtService.CleanupInvalidatedUsers(context.Background()); err != nil {
+		log.Printf("[TokenManager] Ошибка при очистке инвалидированных JWT токенов: %v", err)
+		// Не возвращаем ошибку, так как основная очистка прошла
+	}
 
 	log.Printf("[TokenManager] Выполнена очистка %d истекших токенов", count)
 	return nil
@@ -453,21 +532,47 @@ func (m *TokenManager) CleanupExpiredTokens() error {
 
 // RotateJWTKeys выполняет ротацию ключей подписи JWT
 func (m *TokenManager) RotateJWTKeys() (string, error) {
-	// Генерируем новый ключ
-	keyID, err := m.generateNewJWTKey()
-	if err != nil {
-		log.Printf("[TokenManager] Ошибка при генерации нового ключа JWT: %v", err)
-		return "", err
+	// Убрали проверку пользователя, т.к. ротация - системная операция
+	// _, err := m.userRepo.GetByID(userID)
+	// if err != nil {
+	// 	log.Printf("[TokenManager] Пользователь ID=%d не найден при генерации ключа JWT", userID)
+	// 	return "", NewTokenError(UserNotFound, "пользователь не найден", err)
+	// }
+
+	// Генерируем новый секрет
+	newSecret := generateRandomString(64)
+	newKeyID := generateRandomString(16)
+	now := time.Now()
+	// Используем константу для времени жизни ключа
+	expiry := now.Add(DefaultJWTKeyLifetime)
+
+	newKey := JWTKeyRotation{
+		ID:        newKeyID,
+		Secret:    newSecret,
+		CreatedAt: now,
+		ExpiresAt: expiry,
+		IsActive:  true,
 	}
 
-	// Деактивируем старые ключи, если они слишком старые
-	m.deactivateOldJWTKeys()
+	m.jwtKeysMutex.Lock()
+	// Деактивируем текущий активный ключ (если есть)
+	for i := range m.jwtKeys {
+		if m.jwtKeys[i].IsActive {
+			m.jwtKeys[i].IsActive = false
+			break
+		}
+	}
+	// Добавляем новый ключ
+	m.jwtKeys = append(m.jwtKeys, newKey)
+	m.currentJWTKeyID = newKeyID
+	m.lastKeyRotation = now
+	m.jwtKeysMutex.Unlock()
 
-	// Обновляем время последней ротации
-	m.lastKeyRotation = time.Now()
+	// TODO: Добавить логику сохранения ключей в персистентное хранилище (БД, файл)
+	// сейчас ключи хранятся только в памяти и теряются при перезапуске
+	log.Printf("[TokenManager] Успешно сгенерирован и активирован новый JWT ключ ID: %s", newKeyID)
 
-	log.Printf("[TokenManager] Выполнена ротация ключей JWT, новый ключ: %s", keyID)
-	return keyID, nil
+	return newKeyID, nil
 }
 
 // Служебные функции
@@ -585,7 +690,7 @@ func (m *TokenManager) generateNewJWTKey() (string, error) {
 	return keyID, nil
 }
 
-// deactivateOldJWTKeys деактивирует старые ключи подписи JWT
+// deactivateOldJWTKeys помечает старые (неактивные и истекшие) ключи
 func (m *TokenManager) deactivateOldJWTKeys() {
 	m.jwtKeysMutex.Lock()
 	defer m.jwtKeysMutex.Unlock()
@@ -663,15 +768,38 @@ func (m *TokenManager) GetMaxRefreshTokensPerUser() int {
 
 // InitializeJWTKeys инициализирует ключи подписи JWT при запуске
 func (m *TokenManager) InitializeJWTKeys() error {
-	// Генерируем первый ключ, если нет ключей
-	if len(m.jwtKeys) == 0 {
-		log.Printf("[TokenManager] Инициализация JWT ключей: генерация первого ключа")
-		_, err := m.generateNewJWTKey()
-		if err != nil {
-			return err
-		}
-		m.lastKeyRotation = time.Now()
+	// Добавляем ключ по умолчанию из конфигурации jwtService
+	// TODO: Получать секрет из конфигурации, а не напрямую из jwtService?
+	defaultSecret := "" // Нужно получить секрет из jwtService или конфига
+	if m.jwtService != nil {
+		// defaultSecret = m.jwtService.GetSecret() // Примерный вызов
+		// Пытаемся получить секрет из самого сервиса JWT, если он его хранит (нужен метод GetSecret)
+		// В текущей реализации jwtService секрет приватный. Мы можем его либо передать
+		// при инициализации TokenManager, либо загрузить из конфигурации.
+		// Пока оставим пустым и будем полагаться на ключ из GenerateToken, если Initialize не сработает.
+		log.Println("[TokenManager] Не удалось получить секрет по умолчанию из jwtService для инициализации ключей. Используйте конфигурацию или передайте секрет явно.")
 	}
+
+	if defaultSecret == "" {
+		log.Println("[TokenManager] Предупреждение: Не удалось инициализировать JWT ключи из-за отсутствия секрета по умолчанию.")
+		return nil // Не критично, если jwtService сам использует свой секрет
+	}
+
+	initialKey := JWTKeyRotation{
+		ID:        "initial-key",
+		Secret:    defaultSecret,
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(90 * 24 * time.Hour), // 90 дней
+		IsActive:  true,
+	}
+
+	m.jwtKeysMutex.Lock()
+	m.jwtKeys = append(m.jwtKeys, initialKey)
+	m.currentJWTKeyID = "initial-key"
+	m.jwtKeysMutex.Unlock()
+
+	log.Printf("[TokenManager] Успешно сгенерирован и активирован новый JWT ключ ID: %s", "initial-key")
+
 	return nil
 }
 
@@ -752,4 +880,59 @@ func (m *TokenManager) GetJWTKeySummary() map[string]interface{} {
 		"oldest_key_date": oldestKey,
 		"newest_key_date": newestKey,
 	}
+}
+
+// Добавляем хелпер для лимитирования сессий, чтобы избежать дублирования кода
+func (m *TokenManager) limitUserSessions(userID uint) error {
+	count, err := m.refreshTokenRepo.CountTokensForUser(userID)
+	if err != nil {
+		return fmt.Errorf("ошибка подсчета токенов: %w", err)
+	}
+
+	if count > m.maxRefreshTokensPerUser {
+		log.Printf("[TokenManager] Превышен лимит сессий для пользователя ID=%d (%d > %d). Удаление старых.", userID, count, m.maxRefreshTokensPerUser)
+		if err := m.refreshTokenRepo.MarkOldestAsExpiredForUser(userID, m.maxRefreshTokensPerUser); err != nil {
+			return fmt.Errorf("ошибка маркировки старых токенов: %w", err)
+		}
+	}
+	return nil
+}
+
+// cleanupExpiredCSRFTokensLoop запускает периодическую очистку CSRF токенов
+func (m *TokenManager) cleanupExpiredCSRFTokensLoop() {
+	ticker := time.NewTicker(1 * time.Hour) // Запускаем очистку каждый час
+	defer ticker.Stop()
+
+	for range ticker.C {
+		m.cleanupExpiredCSRFTokens()
+	}
+}
+
+// jwtKeyRotationLoop запускает периодическую ротацию JWT ключей
+// func (m *TokenManager) jwtKeyRotationLoop() { // Раскомментировать если нужна авторотация
+// 	// Определяем интервал ротации (например, каждые 24 часа)
+// 	rotationInterval := 24 * time.Hour
+// 	ticker := time.NewTicker(rotationInterval)
+// 	defer ticker.Stop()
+
+// 	for range ticker.C {
+// 		if _, err := m.RotateJWTKeys(); err != nil {
+// 			log.Printf("[TokenManager] Ошибка автоматической ротации JWT ключей: %v", err)
+// 		} else {
+// 			log.Println("[TokenManager] Автоматическая ротация JWT ключей выполнена успешно")
+// 			m.deactivateOldJWTKeys() // Деактивируем старые ключи после успешной ротации
+// 		}
+// 	}
+// } // Раскомментировать если нужна авторотация
+
+// generateRandomString генерирует случайную строку указанной длины в hex формате
+func generateRandomString(length int) string {
+	b := make([]byte, length/2) // Каждый байт кодируется двумя hex символами
+	if _, err := rand.Read(b); err != nil {
+		// В реальном приложении здесь должна быть более надежная обработка ошибки,
+		// возможно, паника, так как генерация секретов критична.
+		log.Printf("CRITICAL: Ошибка генерации случайных байт: %v", err)
+		panic(fmt.Sprintf("Failed to generate random string: %v", err))
+	}
+	return hex.EncodeToString(b)
 }

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
@@ -9,8 +10,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/yourusername/trivia-api/internal/domain/entity"
+	"github.com/yourusername/trivia-api/internal/handler/dto"
 	"github.com/yourusername/trivia-api/internal/service"
-	"github.com/yourusername/trivia-api/internal/service/quizmanager"
 )
 
 // QuizHandler обрабатывает запросы, связанные с викторинами
@@ -59,15 +60,11 @@ func (h *QuizHandler) CreateQuiz(c *gin.Context) {
 
 // GetQuiz возвращает информацию о викторине
 func (h *QuizHandler) GetQuiz(c *gin.Context) {
-	idStr := c.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid quiz ID"})
-		return
-	}
+	quizID := c.MustGet("quizID").(uint) // Получаем из контекста
 
-	quiz, err := h.quizService.GetQuizByID(uint(id))
+	quiz, err := h.quizService.GetQuizByID(quizID)
 	if err != nil {
+		// TODO: Улучшить обработку ошибок (п.7)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Quiz not found"})
 		return
 	}
@@ -133,12 +130,7 @@ type AddQuestionsRequest struct {
 
 // AddQuestions обрабатывает запрос на добавление вопросов к викторине
 func (h *QuizHandler) AddQuestions(c *gin.Context) {
-	idStr := c.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid quiz ID"})
-		return
-	}
+	quizID := c.MustGet("quizID").(uint) // Получаем из контекста
 
 	var req AddQuestionsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -158,7 +150,7 @@ func (h *QuizHandler) AddQuestions(c *gin.Context) {
 		})
 	}
 
-	if err := h.quizService.AddQuestions(uint(id), questions); err != nil {
+	if err := h.quizService.AddQuestions(quizID, questions); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -173,12 +165,7 @@ type ScheduleQuizRequest struct {
 
 // ScheduleQuiz обрабатывает запрос на планирование времени викторины
 func (h *QuizHandler) ScheduleQuiz(c *gin.Context) {
-	idStr := c.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid quiz ID"})
-		return
-	}
+	quizID := c.MustGet("quizID").(uint) // Получаем из контекста
 
 	var req ScheduleQuizRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -187,13 +174,13 @@ func (h *QuizHandler) ScheduleQuiz(c *gin.Context) {
 	}
 
 	// Сначала обновляем время в базе данных
-	if err := h.quizService.ScheduleQuiz(uint(id), req.ScheduledTime); err != nil {
+	if err := h.quizService.ScheduleQuiz(quizID, req.ScheduledTime); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	// Затем планируем викторину через QuizManager
-	if err := h.quizManager.ScheduleQuiz(uint(id), req.ScheduledTime); err != nil {
+	if err := h.quizManager.ScheduleQuiz(quizID, req.ScheduledTime); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -203,14 +190,10 @@ func (h *QuizHandler) ScheduleQuiz(c *gin.Context) {
 
 // CancelQuiz обрабатывает запрос на отмену викторины
 func (h *QuizHandler) CancelQuiz(c *gin.Context) {
-	idStr := c.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid quiz ID"})
-		return
-	}
+	quizID := c.MustGet("quizID").(uint) // Получаем из контекста
 
-	if err := h.quizManager.CancelQuiz(uint(id)); err != nil {
+	if err := h.quizManager.CancelQuiz(quizID); err != nil {
+		// TODO: Улучшить обработку ошибок (п.7)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -220,15 +203,11 @@ func (h *QuizHandler) CancelQuiz(c *gin.Context) {
 
 // GetQuizWithQuestions возвращает викторину вместе с вопросами
 func (h *QuizHandler) GetQuizWithQuestions(c *gin.Context) {
-	idStr := c.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid quiz ID"})
-		return
-	}
+	quizID := c.MustGet("quizID").(uint) // Получаем из контекста
 
-	quiz, err := h.quizService.GetQuizWithQuestions(uint(id))
+	quiz, err := h.quizService.GetQuizWithQuestions(quizID)
 	if err != nil {
+		// TODO: Улучшить обработку ошибок (п.7)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Quiz not found"})
 		return
 	}
@@ -241,73 +220,19 @@ func (h *QuizHandler) GetQuizWithQuestions(c *gin.Context) {
 		}
 	}
 
-	// Преобразуем формат вопросов для фронтенда
-	type QuestionResponse struct {
-		ID            uint                         `json:"id"`
-		QuizID        uint                         `json:"quiz_id"`
-		Text          string                       `json:"text"`
-		Options       []quizmanager.QuestionOption `json:"options"`
-		CorrectOption int                          `json:"-"`
-		TimeLimitSec  int                          `json:"time_limit_sec"`
-		PointValue    int                          `json:"point_value"`
-		CreatedAt     time.Time                    `json:"created_at"`
-		UpdatedAt     time.Time                    `json:"updated_at"`
-	}
-
-	type QuizResponse struct {
-		ID            uint               `json:"id"`
-		Title         string             `json:"title"`
-		Description   string             `json:"description"`
-		ScheduledTime time.Time          `json:"scheduled_time"`
-		Status        string             `json:"status"`
-		QuestionCount int                `json:"question_count"`
-		Questions     []QuestionResponse `json:"questions,omitempty"`
-		CreatedAt     time.Time          `json:"created_at"`
-		UpdatedAt     time.Time          `json:"updated_at"`
-	}
-
-	// Преобразуем в формат для ответа
-	response := QuizResponse{
-		ID:            quiz.ID,
-		Title:         quiz.Title,
-		Description:   quiz.Description,
-		ScheduledTime: quiz.ScheduledTime,
-		Status:        quiz.Status,
-		QuestionCount: quiz.QuestionCount,
-		CreatedAt:     quiz.CreatedAt,
-		UpdatedAt:     quiz.UpdatedAt,
-		Questions:     make([]QuestionResponse, len(quiz.Questions)),
-	}
-
-	// Преобразуем options для каждого вопроса
-	for i, q := range quiz.Questions {
-		response.Questions[i] = QuestionResponse{
-			ID:            q.ID,
-			QuizID:        q.QuizID,
-			Text:          q.Text,
-			Options:       quizmanager.ConvertOptionsToObjects(q.Options),
-			CorrectOption: q.CorrectOption,
-			TimeLimitSec:  q.TimeLimitSec,
-			PointValue:    q.PointValue,
-			CreatedAt:     q.CreatedAt,
-			UpdatedAt:     q.UpdatedAt,
-		}
-	}
+	// Используем конструктор DTO
+	response := dto.NewQuizResponse(quiz)
 
 	c.JSON(http.StatusOK, response)
 }
 
 // GetQuizResults возвращает результаты викторины
 func (h *QuizHandler) GetQuizResults(c *gin.Context) {
-	idStr := c.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid quiz ID"})
-		return
-	}
+	quizID := c.MustGet("quizID").(uint) // Получаем из контекста
 
-	results, err := h.resultService.GetQuizResults(uint(id))
+	results, err := h.resultService.GetQuizResults(quizID)
 	if err != nil {
+		// TODO: Улучшить обработку ошибок (п.7)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -317,12 +242,7 @@ func (h *QuizHandler) GetQuizResults(c *gin.Context) {
 
 // GetUserQuizResult возвращает результат пользователя для конкретной викторины
 func (h *QuizHandler) GetUserQuizResult(c *gin.Context) {
-	quizIDStr := c.Param("id")
-	quizID, err := strconv.ParseUint(quizIDStr, 10, 32)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid quiz ID"})
-		return
-	}
+	quizID := c.MustGet("quizID").(uint) // Получаем из контекста
 
 	// Получаем ID пользователя из контекста
 	userID, exists := c.Get("user_id")
@@ -331,7 +251,7 @@ func (h *QuizHandler) GetUserQuizResult(c *gin.Context) {
 		return
 	}
 
-	result, err := h.resultService.GetUserResult(userID.(uint), uint(quizID))
+	result, err := h.resultService.GetUserResult(userID.(uint), quizID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Result not found"})
 		return
@@ -362,4 +282,21 @@ func (h *QuizHandler) ListQuizzes(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, quizzes)
+}
+
+// handleQuizError обрабатывает ошибки от сервисов викторин и отправляет соответствующий HTTP ответ
+func (h *QuizHandler) handleQuizError(c *gin.Context, err error) {
+	// Определяем тип ошибки и возвращаем соответствующий статус
+	// TODO: Определить и использовать специфичные типы ошибок из сервисов
+	if errors.Is(err, service.ErrQuizNotFound) { // Пример кастомной ошибки
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+	} else if errors.Is(err, service.ErrQuizNotSchedulable) { // Пример кастомной ошибки
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+	} else if errors.Is(err, service.ErrValidation) { // Пример кастомной ошибки
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
+	} else {
+		// Общая ошибка сервера
+		log.Printf("ERROR: Internal server error in QuizHandler: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+	}
 }

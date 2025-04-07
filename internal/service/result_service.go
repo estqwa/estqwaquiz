@@ -1,14 +1,16 @@
 package service
 
 import (
-	"errors"
+	"context"
 	"fmt"
 	"log"
-	"strconv"
 	"time"
+
+	"gorm.io/gorm"
 
 	"github.com/yourusername/trivia-api/internal/domain/entity"
 	"github.com/yourusername/trivia-api/internal/domain/repository"
+	"github.com/yourusername/trivia-api/internal/websocket"
 )
 
 // ResultService предоставляет методы для работы с результатами
@@ -18,6 +20,8 @@ type ResultService struct {
 	quizRepo     repository.QuizRepository
 	questionRepo repository.QuestionRepository
 	cacheRepo    repository.CacheRepository
+	db           *gorm.DB
+	wsManager    *websocket.Manager
 }
 
 // NewResultService создает новый сервис результатов
@@ -27,6 +31,8 @@ func NewResultService(
 	quizRepo repository.QuizRepository,
 	questionRepo repository.QuestionRepository,
 	cacheRepo repository.CacheRepository,
+	db *gorm.DB,
+	wsManager *websocket.Manager,
 ) *ResultService {
 	return &ResultService{
 		resultRepo:   resultRepo,
@@ -34,78 +40,55 @@ func NewResultService(
 		quizRepo:     quizRepo,
 		questionRepo: questionRepo,
 		cacheRepo:    cacheRepo,
+		db:           db,
+		wsManager:    wsManager,
 	}
 }
 
+/*
 // ProcessUserAnswer обрабатывает ответ пользователя на вопрос
-// Примечание: основное использование этого метода для случаев,
-// когда нет активной викторины под управлением QuizManager
+// !!! ЭТА ФУНКЦИЯ НЕ ИСПОЛЬЗУЕТСЯ И ЛОГИКА ДУБЛИРУЕТСЯ/РЕАЛИЗОВАНА В quizmanager.AnswerProcessor !!!
+// !!! КРОМЕ ТОГО, ЛОГИКА РАСЧЕТА ВРЕМЕНИ ОТВЕТА ЗДЕСЬ НЕКОРРЕКТНА ДЛЯ REAL-TIME !!!
 func (s *ResultService) ProcessUserAnswer(userID, quizID, questionID uint, selectedOption int, timestamp int64) (*entity.UserAnswer, error) {
-	log.Printf("[ResultService] Обработка ответа пользователя #%d на вопрос #%d, выбранный вариант: %d",
-		userID, questionID, selectedOption)
-
 	// Получаем вопрос
 	question, err := s.questionRepo.GetByID(questionID)
 	if err != nil {
-		log.Printf("[ResultService] Ошибка при получении вопроса #%d: %v", questionID, err)
 		return nil, fmt.Errorf("failed to get question: %w", err)
 	}
 
-	// Проверяем, что вопрос относится к указанной викторине
-	if question.QuizID != quizID {
-		log.Printf("[ResultService] Ошибка: вопрос #%d относится к викторине #%d, а не к запрошенной викторине #%d",
-			questionID, question.QuizID, quizID)
-		return nil, errors.New("question does not belong to the specified quiz")
-	}
-
-	// Получаем время начала вопроса из кеша
-	questionStartKey := fmt.Sprintf("question:%d:start_time", questionID)
-	startTimeStr, err := s.cacheRepo.Get(questionStartKey)
-	if err != nil {
-		log.Printf("[ResultService] Ошибка при получении времени начала вопроса #%d: %v", questionID, err)
-		return nil, fmt.Errorf("question start time not found: %w", err)
-	}
-
-	startTime, err := strconv.ParseInt(startTimeStr, 10, 64)
-	if err != nil {
-		log.Printf("[ResultService] Ошибка при парсинге времени начала вопроса #%d: %v", questionID, err)
-		return nil, fmt.Errorf("invalid question start time: %w", err)
-	}
-
-	// Вычисляем время ответа
-	responseTimeMs := timestamp - startTime
-
-	// Проверяем, что время ответа не превышает лимит
-	if responseTimeMs > int64(question.TimeLimitSec*1000) {
-		log.Printf("[ResultService] Ошибка: превышено время ответа пользователя #%d на вопрос #%d (%d мс > %d мс)",
-			userID, questionID, responseTimeMs, question.TimeLimitSec*1000)
-		return nil, errors.New("time limit exceeded")
-	}
-
-	// Проверяем, правильный ли ответ
+	// Проверяем ответ
 	isCorrect := question.IsCorrect(selectedOption)
+	// Некорректный расчет времени для real-time:
+	responseTimeMs := time.Now().UnixMilli() - timestamp // Это время обработки, а не время ответа пользователя
 
-	// Вычисляем количество очков
+	// Вычисляем очки
 	score := question.CalculatePoints(isCorrect, responseTimeMs)
+
+	// TODO: Добавить логику проверки выбывания (elimination), если она нужна здесь
+	// isEliminated := !isCorrect // Упрощенный пример
 
 	// Создаем запись об ответе
 	userAnswer := &entity.UserAnswer{
-		UserID:         userID,
-		QuizID:         quizID,
-		QuestionID:     questionID,
-		SelectedOption: selectedOption,
-		IsCorrect:      isCorrect,
-		ResponseTimeMs: responseTimeMs,
-		Score:          score,
+		UserID:            userID,
+		QuizID:            quizID,
+		QuestionID:        questionID,
+		SelectedOption:    selectedOption,
+		IsCorrect:         isCorrect,
+		ResponseTimeMs:    responseTimeMs,
+		Score:             score,
+		// IsEliminated:      isEliminated,
+		// EliminationReason: "",
+		CreatedAt:         time.Now(),
 	}
 
-	// Сохраняем ответ в БД
+	// Сохраняем ответ
 	if err := s.resultRepo.SaveUserAnswer(userAnswer); err != nil {
 		return nil, fmt.Errorf("failed to save user answer: %w", err)
 	}
 
 	return userAnswer, nil
 }
+*/
 
 // CalculateQuizResult подсчитывает итоговый результат пользователя в викторине
 func (s *ResultService) CalculateQuizResult(userID, quizID uint) (*entity.Result, error) {
@@ -127,6 +110,10 @@ func (s *ResultService) CalculateQuizResult(userID, quizID uint) (*entity.Result
 		return nil, err
 	}
 
+	// Проверяем статус выбывания из Redis
+	eliminationKey := fmt.Sprintf("quiz:%d:eliminated:%d", quizID, userID)
+	isEliminated, _ := s.cacheRepo.Exists(eliminationKey)
+
 	// Подсчитываем общий счет и количество правильных ответов
 	totalScore := 0
 	correctAnswers := 0
@@ -146,24 +133,58 @@ func (s *ResultService) CalculateQuizResult(userID, quizID uint) (*entity.Result
 		Score:          totalScore,
 		CorrectAnswers: correctAnswers,
 		TotalQuestions: len(quiz.Questions),
+		IsEliminated:   isEliminated,
 		CompletedAt:    time.Now(),
 	}
 
-	// Сохраняем результат в БД
-	if err := s.resultRepo.SaveResult(result); err != nil {
+	// --- Начало транзакции ---
+	tx := s.db.Begin()
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+			log.Printf("PANIC recovered during CalculateQuizResult transaction: %v", r)
+		}
+	}()
+
+	if tx.Error != nil {
+		log.Printf("Error starting transaction in CalculateQuizResult: %v", tx.Error)
+		return nil, tx.Error
+	}
+
+	// Сохраняем результат в БД (внутри транзакции)
+	if err := tx.Create(result).Error; err != nil {
+		tx.Rollback()
+		log.Printf("Error saving result in transaction: %v", err)
 		return nil, fmt.Errorf("failed to save result: %w", err)
 	}
 
-	// Обновляем общий счет пользователя
-	if err := s.userRepo.UpdateScore(userID, totalScore); err != nil {
+	// Обновляем общий счет пользователя (внутри транзакции)
+	if err := tx.Model(&entity.User{}).Where("id = ?", userID).Update("total_score", gorm.Expr("total_score + ?", totalScore)).Error; err != nil {
+		tx.Rollback()
+		log.Printf("Error updating user score in transaction: %v", err)
 		return nil, fmt.Errorf("failed to update user score: %w", err)
 	}
 
-	// Увеличиваем счетчик сыгранных игр
-	if err := s.userRepo.IncrementGamesPlayed(userID); err != nil {
+	// Обновляем высший счет, если необходимо (внутри транзакции)
+	if err := tx.Model(&entity.User{}).Where("id = ? AND highest_score < ?", userID, totalScore).Update("highest_score", totalScore).Error; err != nil {
+		// Не откатываем транзакцию из-за этой ошибки, она не критична
+		log.Printf("Warning: Error updating user highest score: %v", err)
+	}
+
+	// Увеличиваем счетчик сыгранных игр (внутри транзакции)
+	if err := tx.Model(&entity.User{}).Where("id = ?", userID).UpdateColumn("games_played", gorm.Expr("games_played + ?", 1)).Error; err != nil {
+		tx.Rollback()
+		log.Printf("Error incrementing games played in transaction: %v", err)
 		return nil, fmt.Errorf("failed to increment games played: %w", err)
 	}
 
+	// --- Коммит транзакции ---
+	if err := tx.Commit().Error; err != nil {
+		log.Printf("Error committing transaction in CalculateQuizResult: %v", err)
+		return nil, err
+	}
+
+	log.Printf("[ResultService] Успешно рассчитан и сохранен результат для пользователя #%d в викторине #%d", userID, quizID)
 	return result, nil
 }
 
@@ -186,4 +207,57 @@ func (s *ResultService) GetUserResult(userID, quizID uint) (*entity.Result, erro
 func (s *ResultService) GetUserResults(userID uint, page, pageSize int) ([]entity.Result, error) {
 	offset := (page - 1) * pageSize
 	return s.resultRepo.GetUserResults(userID, pageSize, offset)
+}
+
+// DetermineWinnersAndAllocatePrizes финализирует результаты викторины,
+// вызывая расчет рангов и призов в репозитории.
+// Предполагается, что базовые результаты (Score, CorrectAnswers, IsEliminated)
+// уже сохранены в таблице results для каждого участника.
+func (s *ResultService) DetermineWinnersAndAllocatePrizes(ctx context.Context, quizID uint) error {
+	log.Printf("[ResultService] Финализация результатов для викторины #%d", quizID)
+
+	// 1. Вызываем CalculateRanks для расчета рангов, определения победителей и призов в БД
+	// Эта функция теперь является единственным источником правды для этих данных.
+	if err := s.resultRepo.CalculateRanks(quizID); err != nil {
+		log.Printf("[ResultService] Ошибка при расчете рангов для викторины #%d: %v", quizID, err)
+		// В зависимости от логики, можно либо вернуть ошибку, либо продолжить
+		// Например, если обновление статуса и отправка WS важны даже при ошибке рангов.
+		return fmt.Errorf("ошибка расчета рангов: %w", err)
+	}
+	log.Printf("[ResultService] Ранги и призы для викторины #%d успешно рассчитаны и сохранены.", quizID)
+
+	// 2. (Опционально) Обновляем статус викторины на "завершена"
+	// TODO: Добавить обновление статуса викторины в `quizRepo`, если необходимо
+	// if err := s.quizRepo.UpdateStatus(quizID, "completed"); err != nil {
+	// 	 log.Printf("[ResultService] Ошибка при обновлении статуса викторины #%d на 'completed': %v", quizID, err)
+	//   // Рассмотреть, является ли эта ошибка критичной
+	// }
+
+	// ===>>> ИЗМЕНЕНИЕ: ОТПРАВКА УВЕДОМЛЕНИЯ О ДОСТУПНОСТИ РЕЗУЛЬТАТОВ <<<===
+	if s.wsManager != nil {
+		resultsAvailableEvent := map[string]interface{}{
+			"quiz_id": quizID,
+		}
+		fullEvent := map[string]interface{}{ // Используем стандартную структуру события
+			"type": "quiz:results_available",
+			"data": resultsAvailableEvent,
+		}
+		if err := s.wsManager.BroadcastEventToQuiz(quizID, fullEvent); err != nil {
+			// Логируем ошибку, но не прерываем выполнение, т.к. основная работа сделана
+			log.Printf("[ResultService] Ошибка при отправке события quiz:results_available для викторины #%d: %v", quizID, err)
+		} else {
+			log.Printf("[ResultService] Событие quiz:results_available для викторины #%d успешно отправлено", quizID)
+		}
+	} else {
+		log.Println("[ResultService] Менеджер WebSocket не инициализирован, уведомление quiz:results_available не отправлено.")
+	}
+	// ===>>> КОНЕЦ ИЗМЕНЕНИЯ <<<===
+
+	log.Printf("[ResultService] Финализация результатов для викторины #%d успешно завершена.", quizID)
+	return nil
+}
+
+// GetQuizWinners возвращает список победителей викторины
+func (s *ResultService) GetQuizWinners(quizID uint) ([]entity.Result, error) {
+	return s.resultRepo.GetQuizWinners(quizID)
 }

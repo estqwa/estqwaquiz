@@ -12,13 +12,39 @@ database:
   sslmode: "disable"
 
 redis:
+  # Режим работы: "single" (по умолчанию), "sentinel", "cluster"
+  mode: "single"
+  # Список адресов (хост:порт). Обязательно для sentinel и cluster.
+  # Для single используется, если указан. Иначе используется addr.
+  addrs: ["localhost:6379"]
+  # Альтернативный адрес для single mode (если addrs пуст)
   addr: "localhost:6379"
   password: ""
   db: 0
+  # Имя master-сервера (только для sentinel mode)
+  master_name: ""
+  # Параметры переподключения (опционально)
+  # max_retries: 3
+  # min_retry_backoff: 8 # ms
+  # max_retry_backoff: 512 # ms
+
+# --- Примеры других конфигураций Redis --- #
+# sentinel:
+#   mode: "sentinel"
+#   addrs: ["host1:26379", "host2:26379", "host3:26379"]
+#   password: "sentinel_password"
+#   master_name: "mymaster"
+#   db: 0
+# cluster:
+#   mode: "cluster"
+#   addrs: ["host1:7000", "host2:7001", "host3:7002"]
+#   password: "cluster_password"
 
 jwt:
   secret: "your_super_secret_key_change_in_production"
   expirationHrs: 24
+  wsTicketExpirySec: 60 # Время жизни WS тикета в секундах (1 минута)
+  cleanup_interval: "1h" # Интервал очистки кеша инвалидированных токенов (например, 1h, 30m)
 
 auth:
   sessionLimit: 10  # Максимальное количество активных сессий на пользователя
@@ -31,8 +57,6 @@ websocket:
     enabled: true
     shardCount: 4                   # Количество шардов
     maxClientsPerShard: 5000        # Максимальное количество клиентов на шард
-    balancingInterval: 30           # Интервал балансировки шардов в секундах
-    loadThresholdPercent: 80        # Порог нагрузки для балансировки (%)
 
   # Настройки буферов и производительности
   buffers:

@@ -11,18 +11,9 @@ import (
 
 // AuthMiddleware обеспечивает аутентификацию для защищенных маршрутов
 type AuthMiddleware struct {
-	jwtService   *auth.JWTService
-	tokenService *auth.TokenService    // Устаревшее, для обратной совместимости
+	jwtService *auth.JWTService
+	// tokenService *auth.TokenService    // УДАЛЕНО: Устаревшее поле
 	tokenManager *manager.TokenManager // Новый менеджер токенов
-}
-
-// NewAuthMiddleware создает новый middleware аутентификации
-// Устаревший метод, для обратной совместимости
-func NewAuthMiddleware(jwtService *auth.JWTService, tokenService *auth.TokenService) *AuthMiddleware {
-	return &AuthMiddleware{
-		jwtService:   jwtService,
-		tokenService: tokenService,
-	}
 }
 
 // NewAuthMiddlewareWithManager создает новый middleware с использованием TokenManager
@@ -31,12 +22,6 @@ func NewAuthMiddlewareWithManager(jwtService *auth.JWTService, tokenManager *man
 		jwtService:   jwtService,
 		tokenManager: tokenManager,
 	}
-}
-
-// WithTokenManager добавляет TokenManager к существующему middleware
-func (m *AuthMiddleware) WithTokenManager(tokenManager *manager.TokenManager) *AuthMiddleware {
-	m.tokenManager = tokenManager
-	return m
 }
 
 // RequireAuth проверяет, аутентифицирован ли пользователь
@@ -67,7 +52,8 @@ func (m *AuthMiddleware) RequireAuth() gin.HandlerFunc {
 				token = parts[1]
 			}
 		} else {
-			// Для обратной совместимости используем только заголовок
+			// Этот блок теперь маловероятен, т.к. TokenManager должен быть всегда
+			// но оставляем на всякий случай, если middleware создается без него
 			authHeader := c.GetHeader("Authorization")
 			if authHeader == "" {
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization header is required", "error_type": "token_missing"})
@@ -86,7 +72,7 @@ func (m *AuthMiddleware) RequireAuth() gin.HandlerFunc {
 		}
 
 		// Проверяем токен
-		claims, err := m.jwtService.ParseToken(token)
+		claims, err := m.jwtService.ParseToken(c, token)
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired token", "error_type": "token_invalid"})
 			c.Abort()

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/yourusername/trivia-api/internal/domain/entity"
+	"github.com/yourusername/trivia-api/internal/handler/helper"
 )
 
 // QuestionManager отвечает за управление вопросами, их отправку и таймеры
@@ -153,7 +154,9 @@ func (qm *QuestionManager) RunQuizQuestions(ctx context.Context, quizState *Acti
 		"question_count": len(quizState.Quiz.Questions),
 	}
 
-	err := qm.deps.WSManager.BroadcastEvent("quiz:start", startEvent)
+	// Используем новую сигнатуру
+	startFullEvent := map[string]interface{}{"type": "quiz:start", "data": startEvent}
+	err := qm.deps.WSManager.BroadcastEventToQuiz(quizState.Quiz.ID, startFullEvent)
 	if err != nil {
 		log.Printf("[QuestionManager] ОШИБКА при отправке события quiz:start для викторины #%d: %v",
 			quizState.Quiz.ID, err)
@@ -170,13 +173,17 @@ func (qm *QuestionManager) RunQuizQuestions(ctx context.Context, quizState *Acti
 		// Получить точное время отправки вопроса
 		sendTimeMs := time.Now().UnixNano() / int64(time.Millisecond)
 
+		// ===>>> ДОБАВИТЬ ВЫЗОВ <<<===
+		quizState.SetCurrentQuestionStartTime(sendTimeMs)
+		// ===>>> КОНЕЦ ИЗМЕНЕНИЯ <<<===
+
 		// Отправляем вопрос всем участникам
 		questionEvent := map[string]interface{}{
 			"question_id":      question.ID,
 			"quiz_id":          quizState.Quiz.ID,
 			"number":           i + 1,
 			"text":             question.Text,
-			"options":          ConvertOptionsToObjects(question.Options),
+			"options":          helper.ConvertOptionsToObjects(question.Options),
 			"time_limit":       question.TimeLimitSec,
 			"total_questions":  len(quizState.Quiz.Questions),
 			"start_time":       sendTimeMs,
@@ -184,23 +191,18 @@ func (qm *QuestionManager) RunQuizQuestions(ctx context.Context, quizState *Acti
 		}
 
 		// Отправка с повторными попытками при ошибке
-		var sendErr error
-		for attempts := 0; attempts < qm.config.MaxRetries; attempts++ {
-			sendErr = qm.deps.WSManager.BroadcastEvent("quiz:question", questionEvent)
-			if sendErr == nil {
-				log.Printf("[QuestionManager] Вопрос #%d для викторины #%d успешно отправлен с %d попытки",
-					question.ID, quizState.Quiz.ID, attempts+1)
-				break
-			}
-			log.Printf("[QuestionManager] ОШИБКА при отправке вопроса #%d для викторины #%d (попытка %d): %v",
-				question.ID, quizState.Quiz.ID, attempts+1, sendErr)
-			time.Sleep(qm.config.RetryInterval)
+		if err := qm.sendEventWithRetry(quizCtx, quizState.Quiz.ID, "quiz:question", questionEvent); err != nil {
+			// Логируем фатальную ошибку отправки вопроса и выходим
+			log.Printf("[QuestionManager] ФАТАЛЬНАЯ ОШИБКА при отправке вопроса #%d для викторины #%d: %v. Прерывание викторины.",
+				question.ID, quizState.Quiz.ID, err)
+			return err // Прерываем выполнение викторины
 		}
 
 		// Сохраняем время начала вопроса для подсчета времени ответа
 		questionStartKey := fmt.Sprintf("question:%d:start_time", question.ID)
+		// Логируем ошибку Redis, но не прерываем викторину
 		if err := qm.deps.CacheRepo.Set(questionStartKey, fmt.Sprintf("%d", sendTimeMs), time.Hour); err != nil {
-			log.Printf("[QuestionManager] ОШИБКА при сохранении времени начала вопроса #%d: %v", question.ID, err)
+			log.Printf("[QuestionManager] WARNING: Не удалось сохранить время начала вопроса #%d в Redis: %v", question.ID, err)
 		}
 
 		// Запускаем таймер для вопроса
@@ -231,16 +233,9 @@ func (qm *QuestionManager) RunQuizQuestions(ctx context.Context, quizState *Acti
 		}
 
 		// Отправка с повторными попытками
-		for attempts := 0; attempts < qm.config.MaxRetries; attempts++ {
-			sendErr = qm.deps.WSManager.BroadcastEvent("quiz:answer_reveal", answerRevealEvent)
-			if sendErr == nil {
-				log.Printf("[QuestionManager] Ответ на вопрос #%d успешно отправлен с %d попытки",
-					question.ID, attempts+1)
-				break
-			}
-			log.Printf("[QuestionManager] ОШИБКА при отправке ответа на вопрос #%d (попытка %d): %v",
-				question.ID, attempts+1, sendErr)
-			time.Sleep(qm.config.RetryInterval)
+		// Логируем ошибку, но не прерываем викторину, т.к. ответ уже не критичен
+		if err := qm.sendEventWithRetry(quizCtx, quizState.Quiz.ID, "quiz:answer_reveal", answerRevealEvent); err != nil {
+			log.Printf("[QuestionManager] WARNING: Не удалось отправить ответ на вопрос #%d: %v", question.ID, err)
 		}
 
 		// Увеличиваем паузу между вопросами
@@ -306,20 +301,22 @@ func (qm *QuestionManager) runQuestionTimer(
 			}
 
 			// Отправляем обновление таймера
-			timerEvent := map[string]interface{}{
+			timerData := map[string]interface{}{
 				"question_id":       question.ID,
 				"remaining_seconds": remaining,
 				"server_timestamp":  time.Now().UnixNano() / int64(time.Millisecond),
 			}
+			timerFullEvent := map[string]interface{}{
+				"type": "quiz:timer",
+				"data": timerData,
+			}
 
-			// Отправляем обновления таймера, но не слишком часто
-			if remaining <= 5 || remaining%5 == 0 {
-				if err := qm.deps.WSManager.BroadcastEvent("quiz:timer", timerEvent); err != nil {
-					log.Printf("[QuestionManager] ОШИБКА при отправке таймера для вопроса #%d: %v", question.ID, err)
-				} else {
-					log.Printf("[QuestionManager] Таймер вопроса #%d (%d из %d): осталось %d секунд",
-						question.ID, questionNumber, len(quiz.Questions), remaining)
-				}
+			// Просто отправляем событие каждую секунду
+			if err := qm.deps.WSManager.BroadcastEventToQuiz(quiz.ID, timerFullEvent); err != nil {
+				log.Printf("[QuestionManager] ОШИБКА при отправке таймера для вопроса #%d: %v", question.ID, err)
+			} else {
+				log.Printf("[QuestionManager] Таймер вопроса #%d (%d из %d): осталось %d секунд",
+					question.ID, questionNumber, len(quiz.Questions), remaining)
 			}
 
 		case <-timerCtx.Done():
@@ -329,18 +326,47 @@ func (qm *QuestionManager) runQuestionTimer(
 	}
 }
 
-// ConvertOptionsToObjects преобразует массив строк в массив объектов с id и text
-func ConvertOptionsToObjects(options entity.StringArray) []QuestionOption {
-	converted := make([]QuestionOption, len(options))
+// --- Вспомогательная функция для отправки событий с ретраями ---
 
-	for i, opt := range options {
-		// Добавляем дополнительную проверку на пустые строки
-		if opt == "" {
-			opt = "(пустой вариант)"
-		}
+// sendEventWithRetry пытается отправить событие через WSManager с заданным количеством попыток.
+// Возвращает ошибку, если все попытки неудачны.
+func (qm *QuestionManager) sendEventWithRetry(ctx context.Context, quizID uint, eventType string, data map[string]interface{}) error {
+	var sendErr error
 
-		converted[i] = QuestionOption{ID: i + 1, Text: opt}
+	// Создаем полное событие для передачи
+	fullEvent := map[string]interface{}{
+		"type": eventType,
+		"data": data,
 	}
 
-	return converted
+	for attempts := 0; attempts < qm.config.MaxRetries; attempts++ {
+		// Проверяем контекст перед каждой попыткой
+		select {
+		case <-ctx.Done():
+			log.Printf("[QuestionManager] Отправка события %s для викторины #%d отменена контекстом (попытка %d)", eventType, quizID, attempts+1)
+			return ctx.Err()
+		default:
+		}
+
+		sendErr = qm.deps.WSManager.BroadcastEventToQuiz(quizID, fullEvent)
+		if sendErr == nil {
+			log.Printf("[QuestionManager] Событие %s для викторины #%d успешно отправлено с %d попытки",
+				eventType, quizID, attempts+1)
+			return nil // Успешно отправлено
+		}
+		log.Printf("[QuestionManager] ОШИБКА при отправке события %s для викторины #%d (попытка %d): %v",
+			eventType, quizID, attempts+1, sendErr)
+
+		// Ожидание перед следующей попыткой с учетом отмены контекста
+		select {
+		case <-time.After(qm.config.RetryInterval):
+			// Продолжаем следующую попытку
+		case <-ctx.Done():
+			log.Printf("[QuestionManager] Ожидание перед ретраем отправки события %s для викторины #%d отменено контекстом", eventType, quizID)
+			return ctx.Err()
+		}
+	}
+	// Если все попытки не удались
+	return fmt.Errorf("не удалось отправить событие %s для викторины #%d после %d попыток: %w",
+		eventType, quizID, qm.config.MaxRetries, sendErr)
 }

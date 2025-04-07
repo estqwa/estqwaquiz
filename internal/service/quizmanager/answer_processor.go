@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"strconv"
 	"time"
 
 	"github.com/yourusername/trivia-api/internal/domain/entity"
@@ -45,6 +44,39 @@ func (ap *AnswerProcessor) ProcessAnswer(
 		return fmt.Errorf("no active quiz")
 	}
 
+	quizID := quizState.Quiz.ID
+
+	// -------------------- Начало проверок выбывания и дубликатов --------------------
+	// Проверяем, не выбыл ли пользователь
+	eliminationKey := fmt.Sprintf("quiz:%d:eliminated:%d", quizID, userID)
+	isEliminated, _ := ap.deps.CacheRepo.Exists(eliminationKey)
+	if isEliminated {
+		log.Printf("[AnswerProcessor] Пользователь #%d уже выбыл из викторины #%d", userID, quizID)
+		// Можно отправить повторное уведомление, если нужно
+		// ap.sendEliminationNotification(userID, quizID, "already_eliminated")
+		return fmt.Errorf("user is eliminated from this quiz")
+	}
+
+	// ===>>> ИЗМЕНЕНИЕ: Используем атомарный SetNX вместо Exists + Set <<<===
+	// Пытаемся установить флаг, что пользователь ответил на этот вопрос.
+	// SetNX вернет true, если ключ УСПЕШНО установлен (т.е. его не было).
+	answerKey := fmt.Sprintf("quiz:%d:user:%d:question:%d", quizID, userID, questionID)
+	wasSet, err := ap.deps.CacheRepo.SetNX(answerKey, "1", 1*time.Hour)
+
+	// Логируем ошибку Redis, но не обязательно прерываем выполнение, если не критично
+	if err != nil {
+		log.Printf("[AnswerProcessor] WARNING: Ошибка Redis при попытке SetNX для user #%d, question #%d: %v", userID, questionID, err)
+		// Можно рассмотреть возврат ошибки, если надежность Redis критична
+		// return fmt.Errorf("redis error during answer check: %w", err)
+	}
+
+	// Если ключ НЕ был установлен (wasSet == false), значит он уже существовал.
+	if !wasSet {
+		log.Printf("[AnswerProcessor] Пользователь #%d уже отвечал на вопрос #%d викторины #%d (определено через SetNX)", userID, questionID, quizID)
+		return fmt.Errorf("user already answered this question")
+	}
+	// ===>>> КОНЕЦ ИЗМЕНЕНИЯ <<<===
+
 	// Получаем текущий вопрос из состояния
 	currentQuestion, _ := quizState.GetCurrentQuestion()
 	if currentQuestion == nil || currentQuestion.ID != questionID {
@@ -73,18 +105,12 @@ func (ap *AnswerProcessor) ProcessAnswer(
 		return fmt.Errorf("user is already eliminated from the quiz")
 	}
 
-	// Получаем время начала вопроса из кеша
-	questionStartKey := fmt.Sprintf("question:%d:start_time", questionID)
-	startTimeStr, err := ap.deps.CacheRepo.Get(questionStartKey)
-	if err != nil {
-		log.Printf("[AnswerProcessor] Ошибка при получении времени начала вопроса #%d: %v", questionID, err)
-		return fmt.Errorf("question start time not found: %w", err)
-	}
-
-	startTime, err := strconv.ParseInt(startTimeStr, 10, 64)
-	if err != nil {
-		log.Printf("[AnswerProcessor] Ошибка при парсинге времени начала вопроса #%d: %v", questionID, err)
-		return fmt.Errorf("invalid question start time: %w", err)
+	// Получаем время начала вопроса из состояния викторины
+	startTime := quizState.GetCurrentQuestionStartTime()
+	if startTime == 0 {
+		// Обработка случая, если время старта не установлено (ошибка логики)
+		log.Printf("[AnswerProcessor] CRITICAL: Время начала для вопроса #%d не найдено в состоянии викторины #%d", questionID, quizID)
+		return fmt.Errorf("internal error: question start time not found in state")
 	}
 
 	// Вычисляем время ответа
@@ -105,31 +131,38 @@ func (ap *AnswerProcessor) ProcessAnswer(
 	score := currentQuestion.CalculatePoints(isCorrect, responseTimeMs)
 
 	// Проверяем, нужно ли выбывать пользователю (неверный ответ или слишком долгий ответ)
-	isEliminated := !isCorrect || isCriticalTimeExceeded
-
-	if isEliminated {
-		reason := "неверный ответ"
-		if isCriticalTimeExceeded {
-			reason = fmt.Sprintf("превышено время ответа (>%d сек)", ap.config.EliminationTimeMs/1000)
+	userShouldBeEliminated := !isCorrect || responseTimeMs > timeLimit
+	eliminationReason := ""
+	if userShouldBeEliminated {
+		if !isCorrect {
+			eliminationReason = "incorrect_answer"
+		} else {
+			eliminationReason = "time_exceeded"
 		}
 
-		log.Printf("[AnswerProcessor] Пользователь #%d выбывает из викторины. Причина: %s", userID, reason)
+		log.Printf("[AnswerProcessor] Пользователь #%d выбывает из викторины #%d. Причина: %s", userID, quizID, eliminationReason)
 
-		// Устанавливаем статус пользователя как "выбывший"
-		if err := ap.deps.CacheRepo.Set(userStatusKey, "eliminated", 24*time.Hour); err != nil {
-			log.Printf("[AnswerProcessor] Ошибка при установке статуса выбывшего пользователя #%d: %v", userID, err)
+		// Устанавливаем статус пользователя как "выбывший" в Redis
+		// Логируем ошибку, но не прерываем основной поток
+		if err := ap.deps.CacheRepo.Set(eliminationKey, "1", 24*time.Hour); err != nil {
+			log.Printf("[AnswerProcessor] WARNING: Не удалось установить статус выбывшего пользователя #%d в Redis: %v", userID, err)
 		}
+
+		// Отправляем уведомление о выбывании пользователю
+		ap.sendEliminationNotification(userID, quizID, eliminationReason)
 	}
 
 	// Создаем запись об ответе
 	userAnswer := &entity.UserAnswer{
-		UserID:         userID,
-		QuizID:         quizState.Quiz.ID,
-		QuestionID:     questionID,
-		SelectedOption: selectedOption,
-		IsCorrect:      isCorrect,
-		ResponseTimeMs: responseTimeMs,
-		Score:          score,
+		UserID:            userID,
+		QuizID:            quizID,
+		QuestionID:        questionID,
+		SelectedOption:    selectedOption,
+		IsCorrect:         isCorrect,
+		ResponseTimeMs:    responseTimeMs,
+		Score:             score,
+		IsEliminated:      userShouldBeEliminated, // Сохраняем статус выбывания в ответе
+		EliminationReason: eliminationReason,      // Сохраняем причину
 	}
 
 	// Сохраняем ответ в БД
@@ -147,7 +180,7 @@ func (ap *AnswerProcessor) ProcessAnswer(
 		"is_correct":          isCorrect,
 		"points_earned":       score,
 		"time_taken_ms":       responseTimeMs,
-		"is_eliminated":       isEliminated,
+		"is_eliminated":       userShouldBeEliminated,
 		"time_limit_exceeded": isTimeLimitExceeded,
 	}
 
@@ -159,8 +192,8 @@ func (ap *AnswerProcessor) ProcessAnswer(
 			userID, questionID, isCorrect, score, responseTimeMs)
 
 		// Если пользователь выбыл, отправляем дополнительное сообщение
-		if isEliminated {
-			reason := "неверный ответ"
+		if userShouldBeEliminated {
+			reason := eliminationReason
 			if isCriticalTimeExceeded {
 				reason = fmt.Sprintf("превышено время ответа (>%d сек)", ap.config.EliminationTimeMs/1000)
 			}
@@ -194,13 +227,16 @@ func (ap *AnswerProcessor) HandleReadyEvent(ctx context.Context, userID uint, qu
 	}
 
 	// Отправляем информацию о готовности пользователя всем участникам
-	readyEvent := map[string]interface{}{
-		"user_id": userID,
-		"quiz_id": quizID,
-		"status":  "ready",
+	fullEvent := map[string]interface{}{
+		"type": "quiz:user_ready",
+		"data": map[string]interface{}{
+			"user_id": userID,
+			"quiz_id": quizID,
+			"status":  "ready",
+		},
 	}
 
-	if err := ap.deps.WSManager.BroadcastEvent("quiz:user_ready", readyEvent); err != nil {
+	if err := ap.deps.WSManager.BroadcastEventToQuiz(quizID, fullEvent); err != nil {
 		log.Printf("[AnswerProcessor] Ошибка при отправке события готовности пользователя #%d к викторине #%d: %v",
 			userID, quizID, err)
 		return fmt.Errorf("failed to broadcast ready event: %w", err)
@@ -210,4 +246,18 @@ func (ap *AnswerProcessor) HandleReadyEvent(ctx context.Context, userID uint, qu
 		userID, quizID)
 
 	return nil
+}
+
+// Новый вспомогательный метод для отправки уведомления о выбывании
+func (ap *AnswerProcessor) sendEliminationNotification(userID uint, quizID uint, reason string) {
+	eliminationEvent := map[string]interface{}{
+		"quiz_id": quizID,
+		"user_id": userID, // Включаем UserID, чтобы клиент мог это проверить
+		"reason":  reason,
+		"message": "Вы выбыли из викторины и можете только наблюдать",
+	}
+
+	if err := ap.deps.WSManager.SendEventToUser(fmt.Sprintf("%d", userID), "quiz:elimination", eliminationEvent); err != nil {
+		log.Printf("[AnswerProcessor] Ошибка при отправке уведомления о выбывании пользователю #%d: %v", userID, err)
+	}
 }

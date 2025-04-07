@@ -4,6 +4,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"log"
 	"time"
 )
 
@@ -53,6 +54,17 @@ func (q *Question) IsCorrect(selectedOption int) bool {
 func (q *Question) CalculatePoints(isCorrect bool, responseTimeMs int64) int {
 	if !isCorrect {
 		return 0
+	}
+
+	// Защита от деления на ноль и невалидного лимита времени
+	if q.TimeLimitSec <= 0 {
+		log.Printf("Warning: Question ID %d has invalid TimeLimitSec (%d). Using default 10s.", q.ID, q.TimeLimitSec)
+		q.TimeLimitSec = 10 // Устанавливаем значение по умолчанию, чтобы избежать паники
+	}
+
+	// Защита от отрицательного времени ответа
+	if responseTimeMs < 0 {
+		responseTimeMs = 0
 	}
 
 	// Максимальные очки, если ответ был дан менее чем за 20% от доступного времени

@@ -14,4 +14,5 @@ type CacheRepository interface {
 	GetJSON(key string, dest interface{}) error
 	Exists(key string) (bool, error)
 	ExpireAt(key string, expiration time.Time) error
+	SetNX(key string, value interface{}, expiration time.Duration) (bool, error)
 }

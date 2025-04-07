@@ -1,9 +1,11 @@
 package handler
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -115,200 +117,149 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 
-	// Получаем информацию о клиенте
-	deviceID := c.GetHeader("X-Device-ID")
-	ipAddress := c.ClientIP()
-	userAgent := c.GetHeader("User-Agent")
+	log.Printf("[AuthHandler] Пользователь ID=%d (%s) успешно зарегистрирован", user.ID, user.Email)
 
-	// Генерируем токены через TokenManager
-	if h.tokenManager != nil {
-		tokenResp, err := h.tokenManager.GenerateTokenPair(user.ID, deviceID, ipAddress, userAgent)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
-			return
-		}
-
-		// Устанавливаем refresh токен в HttpOnly cookie
-		token, tokenErr := h.authService.GetRefreshTokenByUserID(user.ID)
-		if tokenErr == nil && token != nil {
-			h.tokenManager.SetRefreshTokenCookie(c.Writer, token.Token)
-		}
-
-		// Устанавливаем access токен в HttpOnly cookie
-		h.tokenManager.SetAccessTokenCookie(c.Writer, tokenResp.AccessToken)
-
-		// Формируем ответ (без refresh_token и access_token в JSON, так как они теперь в cookie)
-		c.JSON(http.StatusCreated, gin.H{
-			"user":       user,
-			"token_type": tokenResp.TokenType,
-			"expires_in": tokenResp.ExpiresIn,
-			"csrf_token": tokenResp.CSRFToken,
-		})
-		return
-	}
-
-	// Используем старый метод для обратной совместимости
-	authResp, err := h.authService.LoginUser(req.Email, req.Password, deviceID, ipAddress, userAgent)
+	// Генерируем токены сразу после регистрации
+	tokenResp, err := h.tokenManager.GenerateTokenPair(user.ID, "", c.ClientIP(), c.Request.UserAgent())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
+		h.handleAuthError(c, fmt.Errorf("failed to generate tokens after registration: %w", err))
 		return
 	}
 
-	// Формируем ответ для старого метода
-	response := createAuthResponse(authResp)
-	c.JSON(http.StatusCreated, response)
+	// Устанавливаем куки
+	// Предполагаем, что RefreshToken извлекается из tokenManager или передан как-то иначе
+	// Здесь нам нужно получить сам refresh токен для установки куки
+	// Получим последнюю сессию пользователя (немного костыльно, лучше если бы GenerateTokenPair возвращал его)
+	activeSessions, sessionErr := h.authService.GetUserActiveSessions(user.ID)
+	if sessionErr != nil || len(activeSessions) == 0 {
+		log.Printf("[AuthHandler] Ошибка получения refresh токена после регистрации для пользователя ID=%d: %v", user.ID, sessionErr)
+		// Продолжаем без установки куки refresh токена, но это плохо
+	} else {
+		h.tokenManager.SetRefreshTokenCookie(c.Writer, activeSessions[0].Token) // Берем самый новый
+	}
+	h.tokenManager.SetAccessTokenCookie(c.Writer, tokenResp.AccessToken)
+
+	// Возвращаем только необходимые данные в JSON
+	c.JSON(http.StatusCreated, gin.H{
+		"user":        user,                  // Возвращаем информацию о пользователе
+		"accessToken": tokenResp.AccessToken, // Access токен для информации (уже в куке)
+		"csrfToken":   tokenResp.CSRFToken,   // CSRF токен для последующих запросов
+		"userId":      tokenResp.UserID,
+		"expiresIn":   tokenResp.ExpiresIn,
+		"tokenType":   "Bearer",
+	})
 }
 
 // Login обрабатывает запрос на вход
 func (h *AuthHandler) Login(c *gin.Context) {
 	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request data", "details": err.Error()})
 		return
 	}
 
-	// Получаем информацию о клиенте
+	// Используем IP и UserAgent из запроса
+	ipAddress := c.ClientIP()
+	userAgent := c.Request.UserAgent()
+
+	// Используем DeviceID из запроса, если предоставлен
 	deviceID := req.DeviceID
 	if deviceID == "" {
-		deviceID = c.GetHeader("X-Device-ID")
+		// Если deviceID не предоставлен, можно сгенерировать его или использовать UserAgent
+		deviceID = userAgent // Простой вариант
 	}
-	ipAddress := c.ClientIP()
-	userAgent := c.GetHeader("User-Agent")
 
-	// Аутентифицируем пользователя
-	user, err := h.authService.AuthenticateUser(req.Email, req.Password)
+	// Используем обновленный AuthService.LoginUser, который возвращает *manager.TokenResponse
+	tokenResp, err := h.authService.LoginUser(req.Email, req.Password, deviceID, ipAddress, userAgent)
 	if err != nil {
-		log.Printf("[AuthHandler] Ошибка входа: %v", err)
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		h.handleAuthError(c, err)
 		return
 	}
 
-	// Генерируем токены через TokenManager
-	if h.tokenManager != nil {
-		tokenResp, err := h.tokenManager.GenerateTokenPair(user.ID, deviceID, ipAddress, userAgent)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
-			return
-		}
-
-		// Устанавливаем refresh токен в HttpOnly cookie
-		token, tokenErr := h.authService.GetRefreshTokenByUserID(user.ID)
-		if tokenErr == nil && token != nil {
-			h.tokenManager.SetRefreshTokenCookie(c.Writer, token.Token)
-		}
-
-		// Устанавливаем access токен в HttpOnly cookie
-		h.tokenManager.SetAccessTokenCookie(c.Writer, tokenResp.AccessToken)
-
-		// Формируем ответ (без refresh_token и access_token в JSON, так как они теперь в cookie)
-		c.JSON(http.StatusOK, gin.H{
-			"user":       user,
-			"token_type": tokenResp.TokenType,
-			"expires_in": tokenResp.ExpiresIn,
-			"csrf_token": tokenResp.CSRFToken,
-		})
+	// Устанавливаем куки
+	// Нужен сам refresh токен для куки
+	activeSessions, sessionErr := h.authService.GetUserActiveSessions(tokenResp.UserID)
+	if sessionErr != nil || len(activeSessions) == 0 {
+		log.Printf("[AuthHandler] Ошибка получения refresh токена после логина для пользователя ID=%d: %v", tokenResp.UserID, sessionErr)
+		// Фатальная ошибка? Или продолжить без refresh куки?
+		h.handleAuthError(c, fmt.Errorf("failed to retrieve refresh token after login"))
 		return
+	} else {
+		h.tokenManager.SetRefreshTokenCookie(c.Writer, activeSessions[0].Token) // Берем самый новый
+	}
+	h.tokenManager.SetAccessTokenCookie(c.Writer, tokenResp.AccessToken)
+
+	// Получаем информацию о пользователе
+	user, userErr := h.authService.GetUserByID(tokenResp.UserID)
+	if userErr != nil {
+		log.Printf("[AuthHandler] Ошибка получения пользователя ID=%d после логина: %v", tokenResp.UserID, userErr)
+		// Не фатально, можем вернуть ответ без пользователя
 	}
 
-	// Используем старый метод для обратной совместимости
-	authResp, err := h.authService.LoginUser(req.Email, req.Password, deviceID, ipAddress, userAgent)
-	if err != nil {
-		log.Printf("[AuthHandler] Ошибка входа: %v", err)
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Формируем ответ для старого метода
-	response := createAuthResponse(authResp)
-	c.JSON(http.StatusOK, response)
+	// Формируем ответ (больше не используем createAuthResponse)
+	c.JSON(http.StatusOK, gin.H{
+		"user":        user, // Может быть nil, если была ошибка userErr
+		"accessToken": tokenResp.AccessToken,
+		"csrfToken":   tokenResp.CSRFToken,
+		"userId":      tokenResp.UserID,
+		"expiresIn":   tokenResp.ExpiresIn,
+		"tokenType":   "Bearer",
+	})
 }
 
-// RefreshToken обрабатывает запрос на обновление токенов
+// RefreshToken обновляет access токен с помощью refresh токена
+// Обновлено: использует TokenManager, получает refresh из куки, csrf из заголовка
 func (h *AuthHandler) RefreshToken(c *gin.Context) {
-	// Проверяем CSRF токен для защиты от CSRF атак
+	// Получаем refresh токен из HttpOnly куки
+	refreshToken, err := h.tokenManager.GetRefreshTokenFromCookie(c.Request)
+	if err != nil {
+		h.handleAuthError(c, err)
+		return
+	}
+
+	// Получаем CSRF токен из заголовка
 	csrfToken := c.GetHeader(manager.CSRFHeader)
 	if csrfToken == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "CSRF токен отсутствует", "error_type": "csrf_mismatch"})
+		h.handleAuthError(c, manager.NewTokenError(manager.InvalidCSRFToken, "CSRF token missing from header", nil))
 		return
 	}
 
-	// Получаем refresh токен из cookie
-	var refreshToken string
-	var err error
-
-	if h.tokenManager != nil {
-		refreshToken, err = h.tokenManager.GetRefreshTokenFromCookie(c.Request)
-		if err != nil {
-			log.Printf("[AuthHandler] Ошибка получения refresh токена из cookie: %v", err)
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Refresh токен не найден", "error_type": "token_invalid"})
-			return
-		}
-	} else {
-		// Для обратной совместимости пробуем получить из тела запроса
-		var req RefreshTokenRequest
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-		refreshToken = req.RefreshToken
-	}
-
-	// Получаем информацию о клиенте
-	deviceID := c.GetHeader("X-Device-ID")
+	// Используем IP и UserAgent из запроса
 	ipAddress := c.ClientIP()
-	userAgent := c.GetHeader("User-Agent")
+	userAgent := c.Request.UserAgent()
 
-	// Обновляем токены
-	var authResp *service.AuthResponse
-	var tokenResp *manager.TokenResponse
+	// DeviceID - может быть неактуальным при обновлении, используем пустой или из запроса?
+	// Пока используем пустой, так как в запросе его нет
+	deviceID := "" // Или получить из тела запроса, если добавить
 
-	// Используем TokenManager, если он доступен
-	if h.tokenManager != nil {
-		tokenResp, err = h.tokenManager.RefreshTokens(refreshToken, csrfToken, deviceID, ipAddress, userAgent)
-		if err != nil {
-			// Проверяем тип ошибки для более информативного ответа
-			if tokenError, ok := err.(*manager.TokenError); ok {
-				errorMsg := tokenError.Message
-				errorType := string(tokenError.Type)
-				log.Printf("[AuthHandler] Ошибка обновления токена: %s (%s)", errorMsg, errorType)
-				c.JSON(http.StatusUnauthorized, gin.H{"error": errorMsg, "error_type": errorType})
-			} else {
-				log.Printf("[AuthHandler] Ошибка обновления токена: %v", err)
-				c.JSON(http.StatusUnauthorized, gin.H{"error": "Недействительный токен обновления", "error_type": "token_invalid"})
-			}
-			return
-		}
-
-		// Устанавливаем новый refresh токен в HttpOnly cookie
-		// Получаем новый refresh токен из БД, так как токен не возвращается в ответе
-		token, tokenErr := h.authService.GetRefreshTokenByUserID(tokenResp.UserID)
-		if tokenErr == nil && token != nil {
-			h.tokenManager.SetRefreshTokenCookie(c.Writer, token.Token)
-		}
-
-		// Устанавливаем access токен в HttpOnly cookie
-		h.tokenManager.SetAccessTokenCookie(c.Writer, tokenResp.AccessToken)
-
-		// Формируем ответ только с CSRF токеном, т.к. access и refresh токены в cookies
-		c.JSON(http.StatusOK, gin.H{
-			"token_type": tokenResp.TokenType,
-			"expires_in": tokenResp.ExpiresIn,
-			"csrf_token": tokenResp.CSRFToken,
-		})
-		return
-	}
-
-	// Используем старый метод обновления токенов
-	authResp, err = h.authService.RefreshTokens(refreshToken, deviceID, ipAddress, userAgent)
+	// Используем обновленный AuthService.RefreshTokens
+	tokenResp, err := h.authService.RefreshTokens(refreshToken, csrfToken, deviceID, ipAddress, userAgent)
 	if err != nil {
-		log.Printf("[AuthHandler] Ошибка обновления токена (старый метод): %v", err)
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error(), "error_type": "token_invalid"})
+		h.handleAuthError(c, err)
 		return
 	}
 
-	// Формируем ответ
-	response := createAuthResponse(authResp)
-	c.JSON(http.StatusOK, response)
+	// Устанавливаем новую куку для Access Token
+	h.tokenManager.SetAccessTokenCookie(c.Writer, tokenResp.AccessToken)
+	// Refresh Token кука остается прежней (или обновляется, если RefreshTokens возвращает новый?)
+	// В текущей реализации TokenManager генерирует новый refresh токен. Нужно установить новую куку.
+	activeSessions, sessionErr := h.authService.GetUserActiveSessions(tokenResp.UserID)
+	if sessionErr != nil || len(activeSessions) == 0 {
+		log.Printf("[AuthHandler] Ошибка получения нового refresh токена после обновления для пользователя ID=%d: %v", tokenResp.UserID, sessionErr)
+		h.handleAuthError(c, fmt.Errorf("failed to retrieve new refresh token after refresh"))
+		return
+	} else {
+		h.tokenManager.SetRefreshTokenCookie(c.Writer, activeSessions[0].Token) // Устанавливаем новую куку
+	}
+
+	// Формируем ответ (больше не используем createAuthResponse)
+	c.JSON(http.StatusOK, gin.H{
+		"accessToken": tokenResp.AccessToken,
+		"csrfToken":   tokenResp.CSRFToken,
+		"userId":      tokenResp.UserID,
+		"expiresIn":   tokenResp.ExpiresIn,
+		"tokenType":   "Bearer",
+	})
 }
 
 // GetMe возвращает информацию о текущем пользователе
@@ -345,11 +296,11 @@ type UpdateProfileRequest struct {
 
 // UpdateProfile обновляет профиль пользователя
 func (h *AuthHandler) UpdateProfile(c *gin.Context) {
-	// Получаем ID пользователя из контекста
-	userID, exists := c.Get("user_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
-		return
+	userID := c.MustGet("user_id").(uint)
+
+	// CSRF Protection Check (Prefer middleware if router access is available)
+	if !h.checkCSRFToken(c, userID) {
+		return // checkCSRFToken handles response and abort
 	}
 
 	var req UpdateProfileRequest
@@ -358,7 +309,7 @@ func (h *AuthHandler) UpdateProfile(c *gin.Context) {
 		return
 	}
 
-	if err := h.authService.UpdateUserProfile(userID.(uint), req.Username, req.ProfilePicture); err != nil {
+	if err := h.authService.UpdateUserProfile(userID, req.Username, req.ProfilePicture); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -366,106 +317,110 @@ func (h *AuthHandler) UpdateProfile(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Profile updated successfully"})
 }
 
-// Logout обрабатывает запрос на выход из системы
+// Logout обрабатывает выход пользователя.
+// Он извлекает refresh token из HttpOnly cookie, инвалидирует его
+// и очищает cookie на стороне клиента.
 func (h *AuthHandler) Logout(c *gin.Context) {
-	// Получаем ID пользователя из контекста
-	userID, exists := c.Get("user_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
-		return
-	}
+	// 1. Получаем refresh token из HttpOnly cookie
+	// Убедитесь, что имя cookie ("refresh_token") совпадает с тем, что используется при логине
+	refreshToken, err := c.Cookie("refresh_token")
 
-	// Проверяем CSRF токен для защиты от CSRF атак
-	csrfToken := c.GetHeader(manager.CSRFHeader)
-	if csrfToken == "" && h.tokenManager != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "CSRF токен отсутствует", "error_type": "csrf_mismatch"})
-		return
-	}
-
-	if h.tokenManager != nil && !h.tokenManager.VerifyCSRFToken(userID.(uint), csrfToken) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Неверный CSRF токен", "error_type": "csrf_mismatch"})
-		return
-	}
-
-	// Получаем refresh-токен из cookie
-	var refreshToken string
-	var err error
-
-	if h.tokenManager != nil {
-		refreshToken, err = h.tokenManager.GetRefreshTokenFromCookie(c.Request)
-		// Если токен не найден в cookie, пробуем получить из тела запроса
-		if err != nil {
-			var req LogoutRequest
-			if err := c.ShouldBindJSON(&req); err == nil && req.RefreshToken != "" {
-				refreshToken = req.RefreshToken
-			}
-		}
-	} else {
-		// Для обратной совместимости пробуем получить из тела запроса
-		var req LogoutRequest
-		if err := c.ShouldBindJSON(&req); err == nil && req.RefreshToken != "" {
-			refreshToken = req.RefreshToken
-		}
-	}
-
-	// Выполняем выход
-	if refreshToken != "" {
-		// Выходим только из текущей сессии
-		if h.tokenManager != nil {
-			if err := h.tokenManager.RevokeRefreshToken(refreshToken); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to logout, please try again"})
-				return
-			}
-			// Удаляем куки с токенами
-			h.tokenManager.ClearRefreshTokenCookie(c.Writer)
-			h.tokenManager.ClearAccessTokenCookie(c.Writer)
-		} else {
-			// Для обратной совместимости
-			if err := h.authService.LogoutUser(userID.(uint), refreshToken); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to logout, please try again"})
-				return
-			}
-		}
-	} else {
-		// Для обратной совместимости - выходим из всех сессий
-		if err := h.authService.LogoutAllDevices(userID.(uint)); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to logout, please try again"})
+	// 2. Обрабатываем наличие cookie
+	if err != nil {
+		if errors.Is(err, http.ErrNoCookie) {
+			// Cookie не найдено - пользователь уже вышел или сессия истекла.
+			log.Println("[AuthHandler] Logout: Refresh token cookie not found.")
+			// Все равно пытаемся очистить cookie на всякий случай
+			clearAuthCookies(c)
+			c.JSON(http.StatusOK, gin.H{"message": "Already logged out or session expired"})
 			return
 		}
-		// Если доступен TokenManager, удаляем куки
-		if h.tokenManager != nil {
-			h.tokenManager.ClearRefreshTokenCookie(c.Writer)
-			h.tokenManager.ClearAccessTokenCookie(c.Writer)
-		}
+		// Другая ошибка при чтении cookie
+		log.Printf("[AuthHandler] Logout: Error reading refresh token cookie: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not process logout due to cookie error"})
+		return
 	}
 
+	// Проверяем, что токен не пустой (на всякий случай)
+	if refreshToken == "" {
+		log.Println("[AuthHandler] Logout: Refresh token cookie was found but empty.")
+		clearAuthCookies(c)
+		c.JSON(http.StatusOK, gin.H{"message": "Invalid session state"})
+		return
+	}
+
+	// 3. Инвалидируем refresh token через сервис
+	// Middleware RequireAuth уже должен был добавить userID в контекст, если это нужно сервису,
+	// но обычно для инвалидации достаточно самого токена.
+	err = h.authService.LogoutUser(refreshToken)
+	if err != nil {
+		// Логируем ошибку, но все равно продолжаем, чтобы очистить cookie у клиента
+		log.Printf("[AuthHandler] Logout: Failed to invalidate refresh token: %v", err)
+		// Можно вернуть ошибку клиенту, но очистка cookie важнее
+		// utils.RespondWithError(c, http.StatusInternalServerError, "Failed to invalidate session")
+		// return - Решено не возвращать ошибку, а очистить cookie
+	}
+
+	// 4. Очищаем аутентификационные cookie на стороне клиента
+	clearAuthCookies(c)
+
+	log.Println("[AuthHandler] Logout: User logged out successfully.")
 	c.JSON(http.StatusOK, gin.H{"message": "Successfully logged out"})
 }
 
+// clearAuthCookies - вспомогательная функция для очистки cookie.
+// ВАЖНО: Атрибуты (Path, Domain, Secure, HttpOnly, SameSite) должны ТОЧНО совпадать
+// с теми, что использовались при установке cookie в TokenManager, иначе браузер их не удалит.
+func clearAuthCookies(c *gin.Context) {
+	// Атрибуты синхронизированы с pkg/auth/manager/token_manager.go
+	cookieDomain := ""                        // Domain не устанавливался в TokenManager, пустая строка соответствует поведению по умолчанию.
+	cookiePath := "/"                         // Path="/" в TokenManager.
+	cookieSecure := c.Request.TLS != nil      // Secure флаг зависит от HTTPS запроса (соответствует m.isProductionMode в TokenManager).
+	cookieHttpOnly := true                    // HttpOnly=true в TokenManager.
+	cookieSameSite := http.SameSiteStrictMode // SameSite=StrictMode в TokenManager.
+
+	// Очистка refresh token cookie
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     manager.RefreshTokenCookie, // Используем константу
+		Value:    "",
+		Path:     cookiePath,
+		Domain:   cookieDomain,
+		Expires:  time.Unix(0, 0), // Дата в прошлом для удаления
+		MaxAge:   -1,              // MaxAge = -1 для немедленного удаления
+		Secure:   cookieSecure,
+		HttpOnly: cookieHttpOnly,
+		SameSite: cookieSameSite,
+	})
+
+	// Очистка access token cookie (если используется)
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     manager.AccessTokenCookie, // Используем константу
+		Value:    "",
+		Path:     cookiePath,
+		Domain:   cookieDomain,
+		Expires:  time.Unix(0, 0),
+		MaxAge:   -1,
+		Secure:   cookieSecure,
+		HttpOnly: cookieHttpOnly,
+		SameSite: cookieSameSite,
+	})
+
+	log.Println("[AuthHandler] Cleared auth cookies (refresh_token, access_token) with matching attributes")
+}
+
+// GetProfile обрабатывает запрос на получение профиля пользователя
+
 // LogoutAllDevices обрабатывает запрос на выход со всех устройств
 func (h *AuthHandler) LogoutAllDevices(c *gin.Context) {
-	// Получаем ID пользователя из контекста (middleware)
-	userID, exists := c.Get("userID")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Пользователь не аутентифицирован", "error_type": "unauthorized"})
-		return
+	userID := c.MustGet("user_id").(uint)
+
+	// CSRF Protection Check (Prefer middleware if router access is available)
+	if !h.checkCSRFToken(c, userID) {
+		return // checkCSRFToken handles response and abort
 	}
 
-	// Проверяем CSRF токен
-	if !h.checkCSRFToken(c, userID.(uint)) {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Неверный CSRF токен", "error_type": "csrf_mismatch"})
-		return
-	}
-
-	// Получаем причину
-	reason := c.Query("reason")
-	if reason == "" {
-		reason = "user_logout_all"
-	}
-
-	// Отзываем все сессии пользователя
-	err := h.authService.RevokeAllUserSessions(userID.(uint), reason)
-	if err != nil {
+	// 1. Инвалидировать все refresh токены пользователя
+	if err := h.authService.RevokeAllUserSessions(userID, "user_logout_all"); err != nil {
 		log.Printf("[AuthHandler] Ошибка при выходе из всех сессий: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Не удалось выйти из всех сессий", "error_type": "internal_error"})
 		return
@@ -477,10 +432,10 @@ func (h *AuthHandler) LogoutAllDevices(c *gin.Context) {
 			"event":     "logout_all_devices",
 			"user_id":   userID,
 			"timestamp": time.Now().Format(time.RFC3339),
-			"reason":    reason,
+			"reason":    "user_logout_all",
 		}
 
-		if err := h.sendWebSocketNotification(userID.(uint), logoutEvent); err != nil {
+		if err := h.sendWebSocketNotification(userID, logoutEvent); err != nil {
 			log.Printf("[AuthHandler] Ошибка отправки уведомления через WebSocket: %v", err)
 			// Обработка ошибки не критична для основного функционала
 		}
@@ -550,10 +505,20 @@ func (h *AuthHandler) ResetAuth(c *gin.Context) {
 		return
 	}
 
-	// Сбрасываем инвалидации токенов для пользователя
+	// CSRF Protection Check (Added defensively for state-changing debug endpoint)
+	// Using target user ID for check, assuming admin might reset others.
+	// If only self-reset is allowed, use admin's userID from context.
+	adminUserID := c.MustGet("user_id").(uint) // Get admin's ID for the check
+	if !h.checkCSRFToken(c, adminUserID) {
+		return // checkCSRFToken handles response and abort
+	}
+
+	log.Printf("[AuthHandler] Администратор ID=%d сбрасывает инвалидацию токенов для пользователя ID=%d", adminUserID, req.UserID)
+
+	// Вызываем сервис для сброса статуса инвалидации в репозитории invalid_tokens
 	h.authService.ResetUserTokenInvalidation(req.UserID)
 
-	c.JSON(http.StatusOK, gin.H{"message": "Authentication state reset successful"})
+	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("Token invalidation status reset for user %d", req.UserID)})
 }
 
 // CheckRefreshToken проверяет валидность refresh-токена без его обновления
@@ -722,6 +687,13 @@ func (h *AuthHandler) DebugToken(c *gin.Context) {
 
 // ChangePassword обрабатывает запрос на изменение пароля пользователя
 func (h *AuthHandler) ChangePassword(c *gin.Context) {
+	userID := c.MustGet("user_id").(uint)
+
+	// CSRF Protection Check (Prefer middleware if router access is available)
+	if !h.checkCSRFToken(c, userID) {
+		return // checkCSRFToken handles response and abort
+	}
+
 	var req ChangePasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		log.Printf("[ChangePassword] Ошибка валидации запроса: %v", err)
@@ -729,23 +701,15 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 		return
 	}
 
-	// Исправляем опечатку в получении пользователя из контекста
-	userID, exists := c.Get("user_id")
-	if !exists {
-		log.Printf("[ChangePassword] Не удалось получить user_id из контекста")
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-		return
-	}
+	log.Printf("[ChangePassword] Запрос на изменение пароля для пользователя ID=%d", userID)
 
-	log.Printf("[ChangePassword] Запрос на изменение пароля для пользователя ID=%d", userID.(uint))
-
-	if err := h.authService.ChangePassword(userID.(uint), req.OldPassword, req.NewPassword); err != nil {
+	if err := h.authService.ChangePassword(userID, req.OldPassword, req.NewPassword); err != nil {
 		log.Printf("[ChangePassword] Ошибка при изменении пароля: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	log.Printf("[ChangePassword] Пароль успешно изменен для пользователя ID=%d", userID.(uint))
+	log.Printf("[ChangePassword] Пароль успешно изменен для пользователя ID=%d", userID)
 	c.JSON(http.StatusOK, gin.H{"message": "password changed successfully"})
 }
 
@@ -756,6 +720,11 @@ func (h *AuthHandler) AdminResetPassword(c *gin.Context) {
 	if !exists || !isAdmin.(bool) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Только для администраторов"})
 		return
+	}
+
+	// CSRF Protection Check (Prefer middleware if router access is available)
+	if !h.checkCSRFToken(c, c.MustGet("user_id").(uint)) { // Check against admin's CSRF token
+		return // checkCSRFToken handles response and abort
 	}
 
 	var req ResetPasswordRequest
@@ -789,20 +758,13 @@ func (h *AuthHandler) AdminResetPassword(c *gin.Context) {
 
 // RevokeSession обрабатывает запрос на отзыв отдельной сессии
 func (h *AuthHandler) RevokeSession(c *gin.Context) {
-	// Получаем ID пользователя из контекста (middleware)
-	userID, exists := c.Get("userID")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Пользователь не аутентифицирован", "error_type": "unauthorized"})
-		return
+	userID := c.MustGet("user_id").(uint) // ID пользователя, который делает запрос
+
+	// CSRF Protection Check (Prefer middleware if router access is available)
+	if !h.checkCSRFToken(c, userID) {
+		return // checkCSRFToken handles response and abort
 	}
 
-	// Проверяем CSRF токен
-	if !h.checkCSRFToken(c, userID.(uint)) {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Неверный CSRF токен", "error_type": "csrf_mismatch"})
-		return
-	}
-
-	// Получаем данные из запроса
 	var req RevokeSessionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Некорректные данные запроса", "error_type": "invalid_request"})
@@ -816,7 +778,7 @@ func (h *AuthHandler) RevokeSession(c *gin.Context) {
 		return
 	}
 
-	if token.UserID != userID.(uint) {
+	if token.UserID != userID {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Доступ запрещен", "error_type": "forbidden"})
 		return
 	}
@@ -896,6 +858,11 @@ func (h *AuthHandler) UpdateSessionLimit(c *gin.Context) {
 	if !exists || !isAdmin.(bool) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Требуются права администратора", "error_type": "forbidden"})
 		return
+	}
+
+	// CSRF Protection Check (Prefer middleware if router access is available)
+	if !h.checkCSRFToken(c, c.MustGet("user_id").(uint)) { // Check against admin's CSRF token
+		return // checkCSRFToken handles response and abort
 	}
 
 	// Получаем новый лимит из запроса
@@ -1026,26 +993,29 @@ func (h *AuthHandler) handleTokenResponse(c *gin.Context, user *entity.User, tok
 
 // handleAuthError обрабатывает ошибки аутентификации и возвращает соответствующие HTTP-ответы
 func (h *AuthHandler) handleAuthError(c *gin.Context, err error) {
-	// Проверяем, является ли ошибка ошибкой токена
-	if tokenErr, ok := err.(*manager.TokenError); ok {
+	var tokenErr *manager.TokenError
+	if errors.As(err, &tokenErr) {
 		switch tokenErr.Type {
-		case manager.TokenErrorExpired:
+		case manager.ExpiredRefreshToken, manager.ExpiredAccessToken:
 			c.JSON(http.StatusUnauthorized, gin.H{"error": tokenErr.Message, "error_type": "token_expired"})
-		case manager.TokenErrorInvalid:
+		case manager.InvalidRefreshToken, manager.InvalidAccessToken:
 			c.JSON(http.StatusUnauthorized, gin.H{"error": tokenErr.Message, "error_type": "token_invalid"})
-		case manager.TokenErrorMalformed:
-			c.JSON(http.StatusBadRequest, gin.H{"error": tokenErr.Message, "error_type": "token_malformed"})
-		case manager.TokenErrorCSRFMismatch:
-			c.JSON(http.StatusUnauthorized, gin.H{"error": tokenErr.Message, "error_type": "csrf_mismatch"})
+		case manager.InvalidCSRFToken:
+			c.JSON(http.StatusForbidden, gin.H{"error": tokenErr.Message, "error_type": "csrf_mismatch"})
+		case manager.UserNotFound:
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials", "error_type": "invalid_credentials"})
+		case manager.TokenGenerationFailed:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process request", "error_type": "token_generation_failed"})
 		default:
-			c.JSON(http.StatusUnauthorized, gin.H{"error": tokenErr.Message, "error_type": "unauthorized"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "An internal error occurred", "error_type": "internal_server_error"})
 		}
-		return
+	} else if strings.Contains(err.Error(), "неверные учетные данные") || strings.Contains(err.Error(), "invalid email or password") {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials", "error_type": "invalid_credentials"})
+	} else {
+		// Общая ошибка
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "An internal error occurred", "error_type": "internal_server_error"})
 	}
-
-	// Для других типов ошибок
-	log.Printf("[AuthHandler] Ошибка аутентификации: %v", err)
-	c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error(), "error_type": "unauthorized"})
+	log.Printf("[AuthHandler] Auth Error: %v", err) // Логируем реальную ошибку
 }
 
 // sendWebSocketNotification отправляет уведомление через WebSocket

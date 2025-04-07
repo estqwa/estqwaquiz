@@ -1,5 +1,6 @@
-// В начале файла добавляем импорт AuthService
+// В начале файла добавляем импорт AuthService и dateUtils
 import authService from './authService.js';
+import { formatDate, DateFormat, formatRelativeDate } from './dateUtils.js';
 
 // Основные настройки
 const API_BASE_URL = '/api';
@@ -86,6 +87,28 @@ if (submitScheduleBtn) submitScheduleBtn.addEventListener('click', handleSchedul
 
 // Инициализация
 initApp();
+
+function showLogin() {
+    if (loginSection) loginSection.classList.remove('hidden');
+    if (adminPanel) adminPanel.classList.add('hidden');
+    
+    // Проверяем, есть ли параметр error в URL
+    const urlParams = new URLSearchParams(window.location.search);
+    const error = urlParams.get('error');
+    
+    if (error && loginError) {
+        let errorMessage = 'Ошибка входа';
+        
+        if (error === 'session_expired') {
+            errorMessage = 'Срок действия сессии истек. Пожалуйста, войдите снова.';
+        } else if (error === 'invalid_credentials') {
+            errorMessage = 'Неверный email или пароль. Попробуйте снова.';
+        }
+        
+        loginError.textContent = errorMessage;
+        loginError.classList.remove('hidden');
+    }
+}
 
 // Проверка авторизации и отображение нужного блока
 async function initApp() {
@@ -263,7 +286,7 @@ function renderQuizzesList(quizzes) {
             <div class="quiz-status status-${quiz.status}">${getStatusText(quiz.status)}</div>
             <p>${quiz.description || 'Без описания'}</p>
             <p><strong>Вопросов:</strong> ${quiz.question_count || 0}</p>
-            <p><strong>Дата:</strong> ${formatDate(quiz.scheduled_time)}</p>
+            <p><strong>Дата:</strong> ${formatDate(quiz.scheduled_time, DateFormat.SHORT)}</p>
         `;
         quizCard.addEventListener('click', function() {
             const quizId = this.getAttribute('data-quiz-id');
@@ -367,7 +390,7 @@ function renderQuizDetails(quiz) {
     quizInfoElement.innerHTML = `
         <div class="quiz-info-item"><strong>Статус:</strong> <span class="quiz-status status-${quiz.status}">${getStatusText(quiz.status)}</span></div>
         <div class="quiz-info-item"><strong>Описание:</strong> ${quiz.description || 'Нет описания'}</div>
-        <div class="quiz-info-item"><strong>Запланировано на:</strong> ${formatDate(quiz.scheduled_time) || 'Не запланировано'}</div>
+        <div class="quiz-info-item"><strong>Запланировано на:</strong> ${formatDate(quiz.scheduled_time, DateFormat.MEDIUM)} ${formatDate(quiz.scheduled_time, DateFormat.RELATIVE)}</div>
         <div class="quiz-info-item"><strong>Количество вопросов:</strong> ${quiz.questions.length}</div>
     `;
 
@@ -817,44 +840,10 @@ function switchSection(section) {
     }
 }
 
-function showLogin() {
-    if (loginSection) loginSection.classList.remove('hidden');
-    if (adminPanel) adminPanel.classList.add('hidden');
-    
-    // Проверяем, есть ли параметр error в URL
-    const urlParams = new URLSearchParams(window.location.search);
-    const error = urlParams.get('error');
-    
-    if (error && loginError) {
-        let errorMessage = 'Ошибка входа';
-        
-        if (error === 'session_expired') {
-            errorMessage = 'Срок действия сессии истек. Пожалуйста, войдите снова.';
-        } else if (error === 'invalid_credentials') {
-            errorMessage = 'Неверный email или пароль. Попробуйте снова.';
-        }
-        
-        loginError.textContent = errorMessage;
-        loginError.classList.remove('hidden');
-    }
-}
-
 function showAdmin() {
     if (loginSection) loginSection.classList.add('hidden');
     if (adminPanel) adminPanel.classList.remove('hidden');
     switchSection(quizzesSection);
-}
-
-function formatDate(dateString) {
-    if (!dateString) return 'Не указано';
-    const date = new Date(dateString);
-    return date.toLocaleString('ru-RU', {
-        day: '2-digit',
-        month: '2-digit',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit'
-    });
 }
 
 function getStatusText(status) {
@@ -941,5 +930,7 @@ window.appFunctions = {
     switchSection: switchSection,
     showToast: showToast,
     formatDate: formatDate,
-    getStatusText: getStatusText
+    formatRelativeDate: formatRelativeDate,
+    getStatusText: getStatusText,
+    DateFormat: DateFormat
 }; 

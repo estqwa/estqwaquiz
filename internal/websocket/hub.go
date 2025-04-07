@@ -60,7 +60,7 @@ type Hub struct {
 var _ HubInterface = (*Hub)(nil)
 
 // NewHub создает новый экземпляр Hub
-// Устаревший метод, новому коду следует использовать NewShardedHub
+// Устаревший метод, новому коду следует использовать ShardedHub
 func NewHub() *Hub {
 	log.Println("ВНИМАНИЕ: Используется устаревший Hub. Рекомендуется перейти на ShardedHub для поддержки 10,000+ клиентов.")
 
@@ -78,18 +78,6 @@ func NewHub() *Hub {
 	hub.metrics.startTime = time.Now()
 
 	return hub
-}
-
-// NewShardedHubFromConfig создаёт шардированный хаб с указанной конфигурацией
-// Рекомендуется использовать вместо NewHub для новых приложений
-func NewShardedHubFromConfig(config ShardedHubConfig) *ShardedHub {
-	return NewShardedHub(config)
-}
-
-// NewShardedHubWithDefaults создаёт шардированный хаб с настройками по умолчанию
-// Рекомендуется использовать вместо NewHub для новых приложений
-func NewShardedHubWithDefaults() *ShardedHub {
-	return NewShardedHub(DefaultShardedHubConfig())
 }
 
 // Run запускает цикл обработки сообщений Hub
@@ -229,32 +217,53 @@ func (h *Hub) Run() {
 			h.mu.Unlock()
 
 		case message := <-h.broadcast:
+			// Парсим сообщение, чтобы проверить тип и подписку
+			var event Event
+			err := json.Unmarshal(message, &event)
+			shouldFilter := (err == nil) // Фильтруем, только если это валидный Event
+
 			h.mu.RLock()
-			log.Printf("Hub: broadcasting message to %d clients: %s", len(h.clients), string(message))
-
-			// Обновляем метрики
-			h.metrics.mu.Lock()
-			h.metrics.messagesSent += int64(len(h.clients))
-			h.metrics.mu.Unlock()
-
 			for client := range h.clients {
+				// Проверяем подписку только для сообщений типа Event
+				if shouldFilter {
+					if !client.IsSubscribed(event.Type) {
+						// log.Printf("[Hub Broadcast Skip] Client %s is not subscribed to %s", client.UserID, event.Type)
+						continue // Пропускаем клиента, если он не подписан
+					}
+				}
+
+				// Отправляем сообщение клиенту (неблокирующая отправка)
 				select {
 				case client.send <- message:
+					// Сообщение успешно отправлено (или поставлено в очередь)
 				default:
-					log.Printf("Hub: failed to send message to client %s, unregistering", client.UserID)
-
-					h.metrics.mu.Lock()
-					h.metrics.connectionErrors++
-					h.metrics.mu.Unlock()
-
+					// Канал клиента переполнен или закрыт
+					log.Printf("Hub: канал клиента %s переполнен, удаляем клиента", client.ConnectionID)
+					// Блокировка для записи нужна только здесь, если мы удаляем клиента
+					h.mu.RUnlock() // Отпускаем RLock перед захватом Lock
+					h.mu.Lock()
 					close(client.send)
 					delete(h.clients, client)
-					if client.UserID != "" {
-						delete(h.userMap, client.UserID)
+					// Удаляем и из userMap
+					if _, ok := h.userMap[client.UserID]; ok {
+						// Проверяем, тот ли это клиент, если UserID используется несколькими соединениями
+						if h.userMap[client.UserID] == client {
+							delete(h.userMap, client.UserID)
+						}
 					}
+					h.mu.Unlock()
+					h.mu.RLock() // Снова берем RLock для продолжения итерации (или выходим)
+					// Важно: после модификации карты под Lock, итерация может быть не безопасной
+					// Но в Go итерация по карте создает копию ключей на старте (обычно),
+					// так что удаление текущего элемента безопасно. Но нужно быть осторожным.
+					// Более безопасный подход - собрать список на удаление и удалить после цикла.
 				}
 			}
 			h.mu.RUnlock()
+
+		case <-h.done:
+			log.Printf("Hub: cleanup routine stopped")
+			return
 		}
 	}
 }
@@ -322,20 +331,17 @@ func (h *Hub) RunCleanupRoutine() {
 	}
 }
 
-// GetMetrics возвращает текущие метрики Hub
+// GetMetrics возвращает основные метрики хаба.
 func (h *Hub) GetMetrics() map[string]interface{} {
 	h.metrics.mu.RLock()
 	defer h.metrics.mu.RUnlock()
 
-	h.mu.RLock()
-	currentActiveConnections := len(h.clients)
-	h.mu.RUnlock()
-
 	uptime := time.Since(h.metrics.startTime).Seconds()
 
 	return map[string]interface{}{
+		"type":                     "single", // Указываем тип хаба
 		"total_connections":        h.metrics.totalConnections,
-		"active_connections":       currentActiveConnections,
+		"active_connections":       h.ClientCount(), // Используем ClientCount()
 		"messages_sent":            h.metrics.messagesSent,
 		"messages_received":        h.metrics.messagesReceived,
 		"connection_errors":        h.metrics.connectionErrors,

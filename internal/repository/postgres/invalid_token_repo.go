@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"context"
 	"errors"
 	"log"
 	"time"
@@ -21,13 +22,13 @@ func NewInvalidTokenRepo(db *gorm.DB) *InvalidTokenRepo {
 }
 
 // AddInvalidToken добавляет запись об инвалидированном токене
-func (r *InvalidTokenRepo) AddInvalidToken(userID uint, invalidationTime time.Time) error {
+func (r *InvalidTokenRepo) AddInvalidToken(ctx context.Context, userID uint, invalidationTime time.Time) error {
 	// Используем Upsert (INSERT ... ON CONFLICT DO UPDATE) для обновления
 	// существующей записи, если пользователь уже в черном списке
-	err := r.db.Exec(`
+	err := r.db.WithContext(ctx).Exec(`
 		INSERT INTO invalid_tokens (user_id, invalidation_time)
 		VALUES (?, ?)
-		ON CONFLICT (user_id) 
+		ON CONFLICT (user_id)
 		DO UPDATE SET invalidation_time = ?
 	`, userID, invalidationTime, invalidationTime).Error
 
@@ -41,8 +42,8 @@ func (r *InvalidTokenRepo) AddInvalidToken(userID uint, invalidationTime time.Ti
 }
 
 // RemoveInvalidToken удаляет запись об инвалидированном токене
-func (r *InvalidTokenRepo) RemoveInvalidToken(userID uint) error {
-	result := r.db.Delete(&entity.InvalidToken{}, userID)
+func (r *InvalidTokenRepo) RemoveInvalidToken(ctx context.Context, userID uint) error {
+	result := r.db.WithContext(ctx).Delete(&entity.InvalidToken{}, userID)
 	if result.Error != nil {
 		log.Printf("Ошибка при удалении записи из invalid_tokens: %v", result.Error)
 		return result.Error
@@ -58,10 +59,10 @@ func (r *InvalidTokenRepo) RemoveInvalidToken(userID uint) error {
 }
 
 // IsTokenInvalid проверяет, инвалидирован ли токен пользователя
-func (r *InvalidTokenRepo) IsTokenInvalid(userID uint, tokenIssuedAt time.Time) (bool, error) {
+func (r *InvalidTokenRepo) IsTokenInvalid(ctx context.Context, userID uint, tokenIssuedAt time.Time) (bool, error) {
 	var invalidToken entity.InvalidToken
 
-	err := r.db.Where("user_id = ?", userID).First(&invalidToken).Error
+	err := r.db.WithContext(ctx).Where("user_id = ?", userID).First(&invalidToken).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			// Запись не найдена - токен валиден
@@ -83,9 +84,9 @@ func (r *InvalidTokenRepo) IsTokenInvalid(userID uint, tokenIssuedAt time.Time) 
 }
 
 // GetAllInvalidTokens возвращает все записи об инвалидированных токенах
-func (r *InvalidTokenRepo) GetAllInvalidTokens() ([]entity.InvalidToken, error) {
+func (r *InvalidTokenRepo) GetAllInvalidTokens(ctx context.Context) ([]entity.InvalidToken, error) {
 	var tokens []entity.InvalidToken
-	err := r.db.Find(&tokens).Error
+	err := r.db.WithContext(ctx).Find(&tokens).Error
 	if err != nil {
 		log.Printf("Ошибка при получении списка инвалидированных токенов: %v", err)
 		return nil, err
@@ -96,8 +97,8 @@ func (r *InvalidTokenRepo) GetAllInvalidTokens() ([]entity.InvalidToken, error) 
 }
 
 // CleanupOldInvalidTokens удаляет устаревшие записи об инвалидированных токенах
-func (r *InvalidTokenRepo) CleanupOldInvalidTokens(cutoffTime time.Time) error {
-	result := r.db.Where("invalidation_time < ?", cutoffTime).Delete(&entity.InvalidToken{})
+func (r *InvalidTokenRepo) CleanupOldInvalidTokens(ctx context.Context, cutoffTime time.Time) error {
+	result := r.db.WithContext(ctx).Where("invalidation_time < ?", cutoffTime).Delete(&entity.InvalidToken{})
 	if result.Error != nil {
 		log.Printf("Ошибка при очистке устаревших записей в invalid_tokens: %v", result.Error)
 		return result.Error

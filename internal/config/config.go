@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/spf13/viper"
 )
@@ -34,17 +35,42 @@ type DatabaseConfig struct {
 	SSLMode  string
 }
 
-// RedisConfig содержит настройки подключения к Redis
+// RedisConfig содержит унифицированные настройки подключения к Redis
+// Поддерживает режимы: single, sentinel, cluster
 type RedisConfig struct {
-	Addr     string
-	Password string
-	DB       int
+	// Mode: Режим работы Redis ("single", "sentinel", "cluster"). По умолчанию "single".
+	Mode string `mapstructure:"mode"`
+
+	// Addrs: Список адресов Redis (хост:порт). Используется для всех режимов.
+	// Для 'single', если не пуст, используется первый адрес из списка.
+	Addrs []string `mapstructure:"addrs"`
+
+	// Addr: Альтернативный адрес для режима 'single' (для обратной совместимости).
+	// Используется, если Mode="single" и Addrs пустой.
+	Addr string `mapstructure:"addr"`
+
+	Password string `mapstructure:"password"`
+	DB       int    `mapstructure:"db"`
+
+	// MasterName: Имя мастер-сервера Redis (только для режима "sentinel")
+	MasterName string `mapstructure:"master_name"`
+
+	// MaxRetries: Максимальное количество попыток переподключения (-1 - бесконечно). По умолчанию 0 (без ретраев).
+	MaxRetries int `mapstructure:"max_retries"`
+
+	// MinRetryBackoff: Минимальный интервал между попытками (в миллисекундах). По умолчанию 8ms.
+	MinRetryBackoff int `mapstructure:"min_retry_backoff"`
+
+	// MaxRetryBackoff: Максимальный интервал между попытками (в миллисекундах). По умолчанию 512ms.
+	MaxRetryBackoff int `mapstructure:"max_retry_backoff"`
 }
 
 // JWTConfig содержит настройки JWT
 type JWTConfig struct {
-	Secret        string
-	ExpirationHrs int
+	Secret            string
+	ExpirationHrs     int
+	WSTicketExpirySec int           `mapstructure:"wsTicketExpirySec"` // Время жизни тикета для WebSocket в секундах
+	CleanupInterval   time.Duration `mapstructure:"cleanup_interval"`  // Интервал очистки кеша
 }
 
 // AuthConfig содержит настройки аутентификации
@@ -65,11 +91,9 @@ type WebSocketConfig struct {
 
 // ShardingConfig содержит настройки шардирования
 type ShardingConfig struct {
-	Enabled              bool
-	ShardCount           int
-	MaxClientsPerShard   int
-	BalancingInterval    int
-	LoadThresholdPercent int
+	Enabled            bool
+	ShardCount         int
+	MaxClientsPerShard int
 }
 
 // BuffersConfig содержит настройки буферов

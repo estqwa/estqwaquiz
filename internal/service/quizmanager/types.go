@@ -1,6 +1,7 @@
 package quizmanager
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -50,33 +51,30 @@ func DefaultConfig() *Config {
 	}
 }
 
-// Dependencies содержит внешние зависимости для QuizManager
+// ResultService определяет интерфейс для методов сервиса результатов,
+// необходимых QuizManager.
+type ResultService interface {
+	DetermineWinnersAndAllocatePrizes(ctx context.Context, quizID uint) error
+	// Добавьте другие методы ResultService, если они вызываются из QuizManager
+}
+
+// Dependencies содержит зависимости для QuizManager
 type Dependencies struct {
 	QuizRepo      repository.QuizRepository
 	QuestionRepo  repository.QuestionRepository
 	ResultRepo    repository.ResultRepository
-	ResultService ResultService
+	ResultService ResultService // Используем интерфейс
 	CacheRepo     repository.CacheRepository
 	WSManager     *websocket.Manager
 }
 
-// ResultService определяет интерфейс для работы с результатами
-type ResultService interface {
-	CalculateQuizResult(userID, quizID uint) (*entity.Result, error)
-}
-
-// QuestionOption представляет вариант ответа для фронтенда
-type QuestionOption struct {
-	ID   int    `json:"id"`
-	Text string `json:"text"`
-}
-
 // ActiveQuizState хранит состояние активной викторины
 type ActiveQuizState struct {
-	Quiz                  *entity.Quiz
-	CurrentQuestion       *entity.Question
-	CurrentQuestionNumber int
-	Mu                    sync.RWMutex
+	Quiz                       *entity.Quiz
+	CurrentQuestion            *entity.Question
+	CurrentQuestionNumber      int
+	CurrentQuestionStartTimeMs int64 // Добавляем время старта текущего вопроса (Unix ms)
+	Mu                         sync.RWMutex
 }
 
 // NewActiveQuizState создает новое состояние активной викторины
@@ -101,10 +99,25 @@ func (s *ActiveQuizState) GetCurrentQuestion() (*entity.Question, int) {
 	return s.CurrentQuestion, s.CurrentQuestionNumber
 }
 
-// ClearCurrentQuestion очищает текущий вопрос
+// SetCurrentQuestionStartTime устанавливает время начала текущего вопроса
+func (s *ActiveQuizState) SetCurrentQuestionStartTime(startTimeMs int64) {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	s.CurrentQuestionStartTimeMs = startTimeMs
+}
+
+// GetCurrentQuestionStartTime возвращает время начала текущего вопроса
+func (s *ActiveQuizState) GetCurrentQuestionStartTime() int64 {
+	s.Mu.RLock()
+	defer s.Mu.RUnlock()
+	return s.CurrentQuestionStartTimeMs
+}
+
+// ClearCurrentQuestion очищает текущий вопрос и время его старта
 func (s *ActiveQuizState) ClearCurrentQuestion() {
 	s.Mu.Lock()
 	defer s.Mu.Unlock()
 	s.CurrentQuestion = nil
 	s.CurrentQuestionNumber = 0
+	s.CurrentQuestionStartTimeMs = 0
 }

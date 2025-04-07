@@ -3,131 +3,75 @@ package websocket
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
-	"strings"
 	"time"
 )
 
-// WebSocketMetricsHandler возвращает текущие метрики WebSocket-сервера
-func WebSocketMetricsHandler(hub HubInterface) http.HandlerFunc {
+// WebSocketMetricsHandler возвращает обработчик для получения базовых метрик хаба
+func WebSocketMetricsHandler(provider MetricsProvider) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Проверка метода запроса
-		if r.Method != http.MethodGet {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
+		metrics := provider.GetMetrics()
 
-		// Получение формата вывода из query параметра
-		format := r.URL.Query().Get("format")
-		if format == "" {
-			format = "json" // По умолчанию JSON
-		}
+		// Добавляем время генерации метрик
+		metrics["generated_at"] = time.Now().Format(time.RFC3339)
 
-		// Получение метрик
-		metrics := hub.GetMetrics()
-
-		switch strings.ToLower(format) {
-		case "prometheus":
-			// Возвращаем метрики в формате Prometheus
-			w.Header().Set("Content-Type", "text/plain")
-			w.WriteHeader(http.StatusOK)
-			renderPrometheusMetrics(w, metrics)
-		default:
-			// Возвращаем метрики в формате JSON
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-
-			if err := json.NewEncoder(w).Encode(metrics); err != nil {
-				http.Error(w, "Error encoding metrics", http.StatusInternalServerError)
-				return
-			}
-		}
-	}
-}
-
-// DetailedWebSocketMetricsHandler возвращает подробные метрики с информацией по шардам
-func DetailedWebSocketMetricsHandler(hub interface{}) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// Проверка метода запроса
-		if r.Method != http.MethodGet {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		// Получение формата вывода из query параметра
-		format := r.URL.Query().Get("format")
-		if format == "" {
-			format = "json" // По умолчанию JSON
-		}
-
-		var metrics map[string]interface{}
-
-		// Получение детальных метрик в зависимости от типа хаба
-		if shardedHub, ok := hub.(*ShardedHub); ok {
-			metrics = shardedHub.GetDetailedMetrics()
-		} else if legacyHub, ok := hub.(*Hub); ok {
-			metrics = legacyHub.GetMetrics()
-			metrics["is_legacy_hub"] = true
-		} else {
-			http.Error(w, "Invalid hub type", http.StatusInternalServerError)
-			return
-		}
-
-		switch strings.ToLower(format) {
-		case "prometheus":
-			// Возвращаем метрики в формате Prometheus
-			w.Header().Set("Content-Type", "text/plain")
-			w.WriteHeader(http.StatusOK)
-			renderPrometheusMetrics(w, metrics)
-		default:
-			// Возвращаем метрики в формате JSON
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-
-			if err := json.NewEncoder(w).Encode(metrics); err != nil {
-				http.Error(w, "Error encoding metrics", http.StatusInternalServerError)
-				return
-			}
-		}
-	}
-}
-
-// WebSocketHealthCheckHandler возвращает статус здоровья WebSocket-сервера
-func WebSocketHealthCheckHandler(hub HubInterface) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// Проверка метода запроса
-		if r.Method != http.MethodGet {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		// Получаем метрики для проверки статуса
-		metrics := hub.GetMetrics()
-		status := map[string]interface{}{
-			"status":  "healthy",
-			"time":    time.Now().Format(time.RFC3339),
-			"clients": metrics["active_connections"],
-		}
-
-		// Если шардированный хаб, добавляем информацию о шардах
-		if shardedHub, ok := hub.(*ShardedHub); ok {
-			hotShards := shardedHub.GetDetailedMetrics()["hot_shards"]
-			if hotShards != nil {
-				if hotShardsList, ok := hotShards.([]int); ok && len(hotShardsList) > 0 {
-					status["status"] = "degraded"
-					status["reason"] = "hot_shards_detected"
-					status["hot_shards"] = hotShards
-				}
-			}
-		}
-
-		// Устанавливаем заголовки и кодируем ответ
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
+		if err := json.NewEncoder(w).Encode(metrics); err != nil {
+			log.Printf("Error encoding WebSocket metrics: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}
+}
 
-		if err := json.NewEncoder(w).Encode(status); err != nil {
-			http.Error(w, "Error encoding health status", http.StatusInternalServerError)
+// DetailedWebSocketMetricsHandler возвращает обработчик для получения детальных метрик (включая шарды)
+func DetailedWebSocketMetricsHandler(provider DetailedInfoProvider) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Проверяем, что провайдер не nil
+		if provider == nil {
+			w.WriteHeader(http.StatusNotImplemented)
+			w.Write([]byte("Detailed metrics not available for this hub type"))
 			return
+		}
+
+		// Получаем детальные метрики
+		metrics := provider.GetDetailedMetrics()
+		metrics["generated_at"] = time.Now().Format(time.RFC3339)
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(metrics); err != nil {
+			log.Printf("Error encoding detailed WebSocket metrics: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}
+}
+
+// WebSocketHealthCheckHandler возвращает обработчик для проверки состояния хаба
+func WebSocketHealthCheckHandler(provider MetricsProvider) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Простая проверка: если есть активные клиенты, считаем здоровым
+		// Можно добавить более сложные проверки (например, пинг к Redis для PubSub)
+		status := "healthy"
+		statusCode := http.StatusOK
+		clientCount := 0
+
+		if provider != nil {
+			clientCount = provider.ClientCount()
+		} else {
+			status = "unavailable"
+			statusCode = http.StatusServiceUnavailable
+		}
+
+		response := map[string]interface{}{
+			"status":             status,
+			"active_connections": clientCount,
+			"timestamp":          time.Now().Format(time.RFC3339),
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(statusCode)
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			log.Printf("Error encoding WebSocket health check response: %v", err)
 		}
 	}
 }

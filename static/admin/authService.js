@@ -554,14 +554,10 @@ class AuthService {
             'Content-Type': 'application/json'
         };
 
-        if (this.accessToken) {
-            headers['Authorization'] = `Bearer ${this.accessToken}`;
-        }
-
         if (this.csrfToken) {
             headers['X-CSRF-Token'] = this.csrfToken;
             // Добавляем отладочный вывод
-            console.log('Добавлен CSRF токен в заголовки:', this.csrfToken);
+            // console.log('Добавлен CSRF токен в заголовки:', this.csrfToken);
         } else {
             console.warn('CSRF токен отсутствует в заголовках!');
         }
@@ -575,17 +571,40 @@ class AuthService {
      * @private
      */
     _setAuthData(data) {
-        this.accessToken = data.access_token;
+        this.accessToken = null; // Всегда null в cookie режиме для ясности
+
         this.csrfToken = data.csrf_token;
         this.user = data.user;
         
-        // Вычисляем время истечения токена
-        const expiryDate = new Date();
-        expiryDate.setSeconds(expiryDate.getSeconds() + data.expires_in);
-        this.tokenExpiry = expiryDate;
+        // ИЗМЕНЕНО: Логика определения времени истечения
+        let expiryTimestampMs = null;
+        const defaultExpiryMinutes = 15; // Стандартное время жизни access token
+
+        // Пытаемся получить время жизни из ответа (если бэкенд его добавит)
+        if (data.access_token_expires_at) { // Абсолютное время в секундах
+           expiryTimestampMs = data.access_token_expires_at * 1000;
+        } else if (data.access_token_expires_in) { // Длительность в секундах
+            expiryTimestampMs = Date.now() + data.access_token_expires_in * 1000;
+        } else {
+            // Fallback: Используем стандартное время жизни access token
+            console.warn(`Expiry information not provided by backend. Using default ${defaultExpiryMinutes} minutes.`);
+            expiryTimestampMs = Date.now() + defaultExpiryMinutes * 60 * 1000;
+        }
+
+        if (expiryTimestampMs && !isNaN(expiryTimestampMs)) {
+             this.tokenExpiry = new Date(expiryTimestampMs);
+             // Сохраняем время истечения токена (оценка)
+             localStorage.setItem('token_expiry', this.tokenExpiry.toISOString());
+        } else {
+             console.error('Failed to calculate a valid token expiry date.');
+             // Устанавливаем короткий fallback, чтобы избежать ошибок
+             this.tokenExpiry = new Date(Date.now() + 60 * 1000); // 1 минута
+             localStorage.removeItem('token_expiry');
+        }
         
-        // Сохраняем access_token и csrf_token в localStorage
-        localStorage.setItem('access_token', data.access_token);
+        // УДАЛЕНО: Не сохраняем access_token в localStorage
+        // localStorage.setItem('access_token', data.access_token);
+        localStorage.removeItem('access_token'); // Очищаем старое значение на всякий случай
         
         // Сохраняем CSRF токен отдельно
         localStorage.setItem('csrf_token', data.csrf_token);
@@ -593,8 +612,8 @@ class AuthService {
         // Сохраняем данные пользователя
         localStorage.setItem('user', JSON.stringify(data.user));
         
-        // Сохраняем время истечения токена
-        localStorage.setItem('token_expiry', expiryDate.toISOString());
+        // УДАЛЕНО: Не сохраняем token_expiry напрямую здесь, уже сохранили выше
+        // localStorage.setItem('token_expiry', expiryDate.toISOString());
         
         // Сохраняем ID текущей сессии
         if (data.current_session_id) {
@@ -602,11 +621,11 @@ class AuthService {
             localStorage.setItem('session_id', data.current_session_id);
         }
         
-        // Определяем режим аутентификации
-        this.useCookieAuth = !!(this.csrfToken && (!this.accessToken || this.accessToken === 'cookie'));
+        // ИЗМЕНЕНО: Определяем режим аутентификации - если есть CSRF токен, значит режим cookie
+        this.useCookieAuth = !!this.csrfToken;
         // Сохраняем режим аутентификации в localStorage
         localStorage.setItem('use_cookie_auth', this.useCookieAuth.toString());
-        console.log('Режим аутентификации установлен:', this.useCookieAuth ? 'Cookie Auth' : 'Bearer Auth', 
+        console.log('Режим аутентификации установлен:', this.useCookieAuth ? 'Cookie Auth' : 'Bearer Auth',
                   'и сохранен в localStorage');
     }
 

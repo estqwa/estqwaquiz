@@ -59,20 +59,20 @@ var upgrader = gorillaws.Upgrader{
 
 // HandleConnection обрабатывает входящее WebSocket соединение
 func (h *WSHandler) HandleConnection(c *gin.Context) {
-	// Получаем токен из запроса
-	token := c.Query("token")
-	log.Printf("WebSocket: received token: %s", token)
+	// Получаем тикет из запроса (?ticket=...)
+	ticket := c.Query("ticket")
+	log.Printf("WebSocket: received ticket: %s", ticket)
 
-	if token == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Missing token"})
+	if ticket == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Missing ticket"})
 		return
 	}
 
-	// Проверяем токен
-	claims, err := h.jwtService.ParseToken(token)
+	// Проверяем тикет с использованием специальной функции ParseWSTicket
+	claims, err := h.jwtService.ParseWSTicket(ticket)
 	if err != nil {
-		log.Printf("WebSocket: Invalid token - %v", err)
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
+		log.Printf("WebSocket: Invalid or expired ticket - %v", err)
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired ticket"})
 		return
 	}
 
@@ -108,16 +108,41 @@ func (h *WSHandler) registerMessageHandlers() {
 		var readyEvent struct {
 			QuizID uint `json:"quiz_id"`
 		}
+		// Ошибка парсинга - фатальна для этого сообщения
 		if err := json.Unmarshal(data, &readyEvent); err != nil {
-			return err
+			log.Printf("[WSHandler] Ошибка парсинга user:ready: %v, Data: %s", err, string(data))
+			// Отправляем ошибку клиенту перед закрытием
+			h.wsManager.SendErrorToClient(client, "invalid_format", "Failed to parse user:ready event")
+			return fmt.Errorf("failed to parse user:ready event: %w", err)
 		}
 
-		userID, err := strconv.ParseUint(client.UserID, 10, 32)
+		// Устанавливаем QuizID у клиента
+		client.SetQuizID(readyEvent.QuizID)
+		log.Printf("[WSHandler] User %s set QuizID to %d", client.UserID, readyEvent.QuizID)
+
+		// ===>>> ДОБАВИТЬ ВЫЗОВ ПОДПИСКИ <<<===
+		if err := h.wsManager.SubscribeClientToQuiz(client, readyEvent.QuizID); err != nil {
+			// Логируем ошибку подписки, но не обязательно закрывать соединение
+			log.Printf("[WSHandler] Ошибка при подписке User %s на Quiz %d: %v", client.UserID, readyEvent.QuizID, err)
+			// Можно отправить ошибку клиенту
+			h.wsManager.SendErrorToClient(client, "subscribe_error", fmt.Sprintf("Failed to subscribe to quiz %d", readyEvent.QuizID))
+			// return err // Не возвращаем ошибку, чтобы не закрывать соединение сразу
+		}
+		// ===>>> КОНЕЦ ИЗМЕНЕНИЯ <<<===
+
+		// Получаем UserID клиента
+		userID, err := h.parseUserID(client)
 		if err != nil {
-			return err
+			return err // Ошибка парсинга ID фатальна
 		}
 
-		return h.quizManager.HandleReadyEvent(uint(userID), readyEvent.QuizID)
+		// Вызываем QuizManager, логируем ошибку, но не закрываем соединение
+		if err := h.quizManager.HandleReadyEvent(userID, readyEvent.QuizID); err != nil {
+			log.Printf("[WSHandler] Ошибка при обработке HandleReadyEvent для пользователя %d, викторины %d: %v", userID, readyEvent.QuizID, err)
+			// Опционально: отправить ошибку клиенту
+			h.wsManager.SendErrorToClient(client, "ready_error", err.Error())
+		}
+		return nil // Возвращаем nil, чтобы не закрывать соединение
 	})
 
 	// Обработчик для события ответа на вопрос
@@ -127,21 +152,31 @@ func (h *WSHandler) registerMessageHandlers() {
 			SelectedOption int   `json:"selected_option"`
 			Timestamp      int64 `json:"timestamp"`
 		}
+		// Ошибка парсинга - фатальна
 		if err := json.Unmarshal(data, &answerEvent); err != nil {
+			log.Printf("[WSHandler] Ошибка парсинга user:answer: %v, Data: %s", err, string(data))
+			h.wsManager.SendErrorToClient(client, "invalid_format", "Failed to parse user:answer event")
 			return err
 		}
 
-		userID, err := strconv.ParseUint(client.UserID, 10, 32)
+		// Получаем UserID
+		userID, err := h.parseUserID(client)
 		if err != nil {
-			return err
+			return err // Ошибка парсинга ID фатальна
 		}
 
-		return h.quizManager.ProcessAnswer(
-			uint(userID),
+		// Вызываем QuizManager, логируем ошибку, но не закрываем соединение
+		if err := h.quizManager.ProcessAnswer(
+			userID,
 			answerEvent.QuestionID,
 			answerEvent.SelectedOption,
 			answerEvent.Timestamp,
-		)
+		); err != nil {
+			log.Printf("[WSHandler] Ошибка при обработке ProcessAnswer для пользователя %d, вопроса %d: %v", userID, answerEvent.QuestionID, err)
+			// Отправляем специфичную ошибку клиенту
+			h.wsManager.SendErrorToClient(client, "answer_error", err.Error())
+		}
+		return nil // Возвращаем nil, чтобы не закрывать соединение
 	})
 
 	// Обработчик для проверки соединения
@@ -150,6 +185,23 @@ func (h *WSHandler) registerMessageHandlers() {
 		heartbeatResponse := map[string]interface{}{
 			"timestamp": time.Now().UnixNano() / int64(time.Millisecond),
 		}
-		return h.wsManager.SendEventToUser(client.UserID, "server:heartbeat", heartbeatResponse)
+		// Ошибка отправки здесь может быть проигнорирована или залогирована
+		if err := h.wsManager.SendEventToUser(client.UserID, "server:heartbeat", heartbeatResponse); err != nil {
+			log.Printf("[WSHandler] WARNING: Ошибка при отправке server:heartbeat пользователю %s: %v", client.UserID, err)
+		}
+		return nil // Никогда не закрываем соединение из-за heartbeat
 	})
+}
+
+// --- Вспомогательные методы ---
+
+// parseUserID извлекает и парсит UserID из клиента
+func (h *WSHandler) parseUserID(client *websocket.Client) (uint, error) {
+	userIDUint64, err := strconv.ParseUint(client.UserID, 10, 32)
+	if err != nil {
+		log.Printf("[WSHandler] CRITICAL: Ошибка конвертации UserID '%s' в uint: %v", client.UserID, err)
+		h.wsManager.SendErrorToClient(client, "internal_error", "Invalid user ID format")
+		return 0, fmt.Errorf("failed to parse user ID: %w", err) // Фатальная ошибка
+	}
+	return uint(userIDUint64), nil
 }
